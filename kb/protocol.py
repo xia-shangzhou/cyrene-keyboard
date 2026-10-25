@@ -174,8 +174,47 @@ def build_ledparam(
 # ---------------------------------------------------------------- 音乐律动
 
 AUDIO_BANDS = 16      # 协议固定 16 段
-AUDIO_MAX = 6         # 每段取值 0-6，超出固件忽略
+AUDIO_MAX = 6         # USB 帧里每段取值 0-6，超出固件忽略
+AUDIO_BLE_MAX = 5     # 蓝牙半字节打包每段取值 0-5（文档口径），超出截断
 AUDIO_MODES = (20, 22)  # 20=音乐节奏, 22=音乐律动条，同一渲染器、只看样式
+
+
+def build_audio_viz_ble(bands: list[int] | bytes | tuple[int, ...],
+                        high_first: bool = False) -> bytes:
+    """SET_AUDIO_VIZ (0x0D) 帧 —— **蓝牙线格式**，和 USB 完全不同。
+
+    同平台文档（MonsGeek PROTOCOL.md §0x0D）明确：蓝牙/接收器不走 USB 那套
+    「padding + 校验和 + 16 字节频段」，而是：
+
+      - 频段**半字节打包**：一个字节装两段，每段 0-5
+      - 数据**紧跟命令字节**：没有 padding、也没有校验和
+        （BLE 载荷本来就没有校验和的位置，硬塞会覆盖掉一段频段）
+      - 拿 USB 格式往蓝牙上发的实测症状：柱子「镜像且变小」——
+        频段数据落错位置，固件把 padding/校验和当成了频段
+
+    返回的仍是 FRAME_LEN 标准帧（frame[0]=0、frame[1]=0x0D、frame[2..9]=8 个
+    半字节包），走 `Keyboard.send()` 时由 `ble_payload()` 换成 0x55 前导，
+    固件看到的就是 `0x55 + 0x0D + 频段半字节`。
+
+    high_first：半字节顺序。低 nibble 在前（默认）还是高 nibble 在前目前
+    没有文档依据，发反了柱子会左右镜像 —— 留成参数，用探针实测定。
+    """
+
+    def q(v) -> int:
+        v = 0 if v < 0 else (AUDIO_BLE_MAX if v > AUDIO_BLE_MAX else int(v))
+        return v & 0x0F
+
+    # 容错：传 8 个频段（UI 的 levels()）就按"相邻两段同值"展开成 16 段，
+    # 和音频引擎 snapshot() 的 16 段语义一致
+    if len(bands) == AUDIO_BANDS // 2:
+        bands = [v for v in bands for _ in range(2)]
+
+    frame = bytearray(FRAME_LEN)
+    frame[1] = Cmd.SET_AUDIO_VIZ
+    for j in range(AUDIO_BANDS // 2):
+        first, second = q(bands[2 * j]), q(bands[2 * j + 1])
+        frame[2 + j] = ((first << 4) | second) if high_first else ((second << 4) | first)
+    return bytes(frame)
 
 
 def build_audio_viz(bands: list[int] | bytes | tuple[int, ...]) -> bytes:

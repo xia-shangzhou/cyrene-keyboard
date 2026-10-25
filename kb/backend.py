@@ -386,15 +386,21 @@ class HidBackend(Backend):
         只发数据，不切模式 —— 调用方必须先用 set_led() 把模式设成 20/22，
         否则固件没有渲染器接手，数据白推。
 
-        单独实现而不复用 `_send`：0x0D 的帧布局是「校验和 frame[8] + 数据
-        frame[9..24]」，和 LED 命令的 build_led_cmd 完全不是一套。
+        **USB 和蓝牙的线格式完全不同**（2026-10-25 实测踩坑）：
+        - USB/2.4G：校验和 frame[8] + 16 个整字节频段 frame[9..24]
+        - 蓝牙：频段**半字节打包**紧跟命令字节，没有 padding 和校验和；
+          拿 USB 格式往蓝牙上发，症状是柱子「镜像且变小」——
+          频段全落错位置，固件把 padding/校验和当成了频段
         """
         self.policy.assert_allowed(P.Cmd.SET_AUDIO_VIZ)
         if not self.kb:
             raise RuntimeError("未连接")
         if not self.policy.may_send(P.Cmd.SET_AUDIO_VIZ):
             return False
-        self.kb.send(P.build_audio_viz(bands))
+        if getattr(self.kb, "ble", False):
+            self.kb.send(P.build_audio_viz_ble(bands))
+        else:
+            self.kb.send(P.build_audio_viz(bands))
         # 不记 write：0x0D 不写 flash，记进去会让「本次写入」每秒涨 50 次
         self.policy.note_stream()
         return True
