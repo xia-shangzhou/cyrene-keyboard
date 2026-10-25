@@ -60,7 +60,9 @@ check("放行 GET_LEDPARAM", pol.assert_allowed(P.Cmd.GET_LEDPARAM) is None)
 check("放行 SET_LEDPARAM", pol.assert_allowed(P.Cmd.SET_LEDPARAM) is None)
 check("放行 SET_AUDIO_VIZ", pol.assert_allowed(P.Cmd.SET_AUDIO_VIZ) is None)
 check("0x0E 屏幕取色仍拦截", P.Cmd.SET_SCREEN_COLOR in FORBIDDEN)
-check("重复值跳过", pol.values_changed("k", (1, 2)) and not pol.values_changed("k", (1, 2)))
+check("重复值跳过", not pol.values_unchanged("k", (1, 2)))
+pol.remember_values("k", (1, 2))
+check("重复值跳过", pol.values_unchanged("k", (1, 2)))
 
 # 流式命令不能被 350ms 写限流卡住，否则音乐律动只能跑到 3Hz
 pol2 = SafetyPolicy()

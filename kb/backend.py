@@ -169,19 +169,29 @@ class HidBackend(Backend):
 
     def _send(self, cmd: int, params=None, *, bit8: bool = False, key: str = "",
               values: tuple | None = None) -> bool:
+        """发一条写命令。返回 False = **这次没发出去**（被限流），调用方必须处理。
+
+        ⚠ 顺序不能换（2026-10-25 修）：先查「值有没有变」（纯查询），
+        再查「能不能发」（限流），**两者都过了才真正发送、最后才记录值**。
+        反过来先记录的话，被限流那一次会把值记成"已发送"，
+        下次同样的值直接被判成"没变"，于是这个值永远发不出去。
+        """
         self.policy.assert_allowed(cmd)
         if not self.kb:
             raise RuntimeError("未连接")
-        # 值没变就不发，省一次 flash 擦写
-        if key and values is not None and not self.policy.values_changed(key, values):
+        # 值没变就不发，省一次 flash 擦写（注意：只查不改）
+        if key and values is not None and self.policy.values_unchanged(key, values):
+            self.policy.note_duplicate()
             return True
         if not self.policy.may_send(cmd):
-            return False
+            return False          # 没发出去，也绝不记录值
         if cmd in (P.Cmd.SET_LEDPARAM, P.Cmd.SET_SLEDPARAM):
             frame = P.build_led_cmd(cmd, params or [])
         else:
             frame = P.build(cmd, params, bit8=bit8)
         self.kb.send(frame)
+        if key and values is not None:
+            self.policy.remember_values(key, values)   # 真发出去了才记
         self.policy.note_write()
         return True
 
@@ -337,18 +347,21 @@ class HidBackend(Backend):
         )
 
     def set_perkey(self, perkey: PerKey) -> bool:
-        """逐键静态 RGB（SET_USERPIC 0x0C）。
+        """逐键静态 RGB（SET_USERPIC 0x0C）—— **当前禁用，调用即报错**。
 
-        只为用户显式点「应用」时调用，不做实时同步 —— 这是大量 flash 写入。
+        帧布局没有实测过（每帧塞几个键、起始索引怎么给、是否分块都未知），
+        而且固件读不回来（0x8C 全回显），盲写错位会出现「点 A 亮 B」。
+        2026-10-25 把这把命令移进 FORBIDDEN：留着一个"能调但结果不可控"的写接口，
+        和日志里「任何调用路径都无法绕过」的承诺不一致。
+
+        要启用：先用真机实测出帧格式 → 从 safety.FORBIDDEN 移出 →
+        在 ALLOWED_WRITE 里加回 → 再打开这里的实现。
         """
-        if not perkey.colors:
-            return False
-        # 布局待真机确认，先按 [cmd, layer/profile, index, r, g, b] 6 字节/键打包
-        payload: list[int] = []
-        for idx in sorted(perkey.colors):
-            r, g, b = perkey.colors[idx]
-            payload += [idx & 0xFF, r & 0xFF, g & 0xFF, b & 0xFF]
-        return self._send(P.Cmd.SET_USERPIC, [0x00] + payload, bit8=False)
+        raise UnsafeCommandError(
+            "逐键 RGB 未实现：SET_USERPIC(0x0C) 的帧格式未经验证，"
+            "且固件不支持读回（0x8C 全回显），已按安全策略禁用。"
+            "请用键盘自带的 Fn+Z/X/C 进入 → Fn+V 录制 → Fn+V 保存。"
+        )
 
     def set_audio_viz(self, bands: list[int]) -> bool:
         """音乐律动：推一帧 16 段电平（SET_AUDIO_VIZ 0x0D）。
@@ -409,29 +422,33 @@ class MockBackend(Backend):
                            note="模拟数据")
 
     def set_led(self, st: LedState) -> bool:
-        if not self.policy.values_changed(
-            "led", (st.mode, st.speed, st.brightness, st.direction, st.colorful, st.rgb)
-        ):
+        # 和 HidBackend 同样的顺序：先查（不改状态）→ 再限流 → 通过后才落值
+        vals = (st.mode, st.speed, st.brightness, st.direction, st.colorful, st.rgb)
+        if self.policy.values_unchanged("led", vals):
+            self.policy.note_duplicate()
             return True
         if not self.policy.may_send(P.Cmd.SET_LEDPARAM):
             return False
         self.led = LedState(**st.__dict__)
+        self.policy.remember_values("led", vals)
         self.policy.note_write()
         return True
 
     def set_sled(self, st: LedState) -> bool:
-        if not self.policy.values_changed(
-            "sled", (st.mode, st.speed, st.brightness, st.direction, st.colorful, st.rgb)
-        ):
+        vals = (st.mode, st.speed, st.brightness, st.direction, st.colorful, st.rgb)
+        if self.policy.values_unchanged("sled", vals):
+            self.policy.note_duplicate()
             return True
+        if not self.policy.may_send(P.Cmd.SET_SLEDPARAM):
+            return False
         self.sled = LedState(**st.__dict__)
+        self.policy.remember_values("sled", vals)
         self.policy.note_write()
         return True
 
     def set_perkey(self, perkey: PerKey) -> bool:
-        self.perkey = perkey
-        self.policy.note_write()
-        return True
+        """与真实后端保持一致：逐键 RGB 已禁用（帧格式未验证）。"""
+        raise UnsafeCommandError("逐键 RGB 未实现：SET_USERPIC(0x0C) 帧格式未经验证，已禁用")
 
     def set_audio_viz(self, bands: list[int]) -> bool:
         """模拟模式下只存最后一批，用来在无硬件时跑通 UI。"""

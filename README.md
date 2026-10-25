@@ -168,19 +168,21 @@ python tools/probe_link.py
 
 ### 永远不做
 
-这六条不是"暂时不做"，是**默认拒绝原则**下被代码硬拦的：
+这几条不是"暂时不做"，是**默认拒绝原则**下被代码硬拦的：
 
 | 命令 | 为什么不做 |
 |---|---|
 | `0x7F` `0x30` `0x31` 固件升级 / bootloader | 刷坏即变砖 |
 | `0x01` 恢复出厂设置 | 会清空全部自定义配置 |
 | `0x0A` `0x0B` `0x10` 改键 / 宏 / Fn 层 | **该固件对参数不做越界检查**，传超范围值会写坏 RAM，`macro_id>=16` 甚至能覆盖栈返回地址 |
+| `0x0C` 逐键静态 RGB | 帧布局未经验证、固件读不回来，盲写会出现「点 A 亮 B」。要启用先实测出格式 |
 | `0xF8` `0x7A` 配对控制 | 会断开当前连接 |
 | `0x65` `0x1B` `0x1C` `0x1E` 磁轴命令 | 本键盘是机械轴，无意义 |
 | 任何不在白名单里的未知命令 | 默认拒绝 |
 
 实现位置：`kb/safety.py` 的 `FORBIDDEN` 字典 + `SafetyPolicy.assert_allowed()`。
-所有收发都只能走 `HidBackend._query` / `_send` 这两个出口，都要先过这道闸。
+**两道闸**：上层 `HidBackend._send()` 过策略，底层 `Keyboard.send()` 再无条件拦一次
+`FORBIDDEN` —— 直接调底层也绕不过去。
 
 ### 唯一认下的真实风险：flash 磨损
 
@@ -274,10 +276,11 @@ python main.py --mock     # 强制模拟模式，完全不碰硬件
 python main.py --probe    # 只做真机探测，不开界面
 ```
 
-自检（三条都应该全绿）：
+自检（四条都应该全绿）：
 
 ```bash
 python tools/smoke_test.py         # 协议 / 安全 / 后端 / 界面构造
+python tools/test_safety.py        # 限流补发 / 危险命令拦截 / 回显 / 读不到（不碰硬件）
 python tools/test_audioviz.py      # 音频引擎（合成扫频）
 python tools/test_music_page.py    # 律动页全流程（offscreen，不碰真机）
 ```

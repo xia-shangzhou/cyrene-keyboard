@@ -59,7 +59,6 @@ READ_ONLY: frozenset[int] = frozenset({
 ALLOWED_WRITE: frozenset[int] = frozenset({
     P.Cmd.SET_LEDPARAM,    # 灯效模式/速度/亮度/方向/颜色
     P.Cmd.SET_SLEDPARAM,   # 侧面灯条
-    P.Cmd.SET_USERPIC,     # 逐键静态 RGB
     P.Cmd.SET_PROFILE,     # 切换配置槽（只切槽位，不改内容）
     P.Cmd.SET_AUDIO_VIZ,   # 音乐律动 16 段电平（瞬时流式数据，见下方 STREAMING）
 })
@@ -72,6 +71,9 @@ STREAMING: frozenset[int] = frozenset({
 # 永久禁止。理由写在注释里，别随手放开。
 FORBIDDEN: dict[int, str] = {
     0x01: "SET_RESET 恢复出厂设置 —— 会清空全部自定义配置",
+    0x0C: ("SET_USERPIC 逐键静态 RGB —— 帧布局未经验证（每帧塞几个键、起始索引怎么给、"
+           "是否分块都未知），且固件读不回来（0x8C 全回显），盲写错位会出现「点 A 亮 B」。"
+           "要启用必须先实测出帧格式，再从这里移出"),
     0x0A: "SET_KEYMATRIX 改键 —— 固件对 layer_id 无越界检查，可写坏 RAM",
     0x0B: "SET_MACRO 宏 —— 固件无越界检查，macro_id>=16 可覆盖栈返回地址",
     0x10: "SET_FN 改 Fn 层 —— 固件无越界检查，可写坏 RAM",
@@ -89,11 +91,10 @@ FORBIDDEN: dict[int, str] = {
     0x65: "SET_MULTI_MAGNETISM 磁轴批量写 —— 本键盘非磁轴",
 }
 
-# 会触发 flash 保存的命令，需要节流
+# 会触发 flash 保存的命令（当前用于文档说明与人工核对；实际节流按 ALLOWED_WRITE 走）
 FLASH_WRITING: frozenset[int] = frozenset({
     P.Cmd.SET_LEDPARAM,
     P.Cmd.SET_SLEDPARAM,
-    P.Cmd.SET_USERPIC,
     P.Cmd.SET_PROFILE,
 })
 
@@ -164,19 +165,31 @@ class SafetyPolicy:
         self._last_sent[cmd] = now
         return True
 
-    def values_changed(self, key: str, values: tuple) -> bool:
-        """同样的值不重复下发 —— 这条能挡掉拖滑块时 90% 的无谓 flash 写入。"""
-        if self._last_values.get(key) == values:
-            self.stats["skipped_duplicate"] += 1
-            return False
+    def values_unchanged(self, key: str, values: tuple) -> bool:
+        """值是否和上次**成功发出**的一样。**纯查询，不改任何状态。**
+
+        ⚠ 这里绝对不能顺手把 values 记下来（2026-10-25 的 bug）：
+        原先叫 `values_changed()`，检查的同时就记录了。配合后面的限流判断，
+        会造成 —— 本次被限流没发出去，但值已经记成"已发送"，
+        于是下一次同样的值被判成"没变"直接 return True，
+        **这个值就永远发不出去了**（只有 forget() 能解锁）。
+        症状是：拖滑块后界面显示新值、键盘还是旧的，再拖同一位置毫无反应。
+        """
+        return self._last_values.get(key) == values
+
+    def remember_values(self, key: str, values: tuple) -> None:
+        """**只有帧真的发出去了**才调用这里记录。"""
         self._last_values[key] = values
-        return True
 
     def forget(self, key: str) -> None:
         self._last_values.pop(key, None)
 
     def note_read(self) -> None:
         self.stats["read"] += 1
+
+    def note_duplicate(self) -> None:
+        """值没变、主动跳过的那次 —— 单独计数，界面会显示「跳过重复值」。"""
+        self.stats["skipped_duplicate"] += 1
 
     def note_write(self) -> None:
         """只在**会写 flash** 的命令上调用。

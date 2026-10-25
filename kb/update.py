@@ -23,8 +23,8 @@ from dataclasses import dataclass
 
 # ---------------------------------------------------------------- 常量
 
-# ⚠ 改成你自己的 GitHub 仓库（owner/repo 形式，不带域名）
-GITHUB_REPO = "owner/cyrene-keyboard"
+# 发布仓库（owner/repo 形式，不带域名）
+GITHUB_REPO = "xia-shangzhou/cyrene-keyboard"
 
 APP_VERSION = "0.4.0"
 APP_VERSION_LABEL = f"v{APP_VERSION}"

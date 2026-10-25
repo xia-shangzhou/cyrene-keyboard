@@ -999,7 +999,16 @@ class MusicPage(QWidget):
 
         try:
             b.policy.forget("led")
-            b.set_led(self._music_state())
+            if not self._set_led_retry(self._music_state()):
+                # 切不进音乐模式，推帧全是白推（固件没有渲染器接手）
+                QMessageBox.warning(
+                    self, "切换音乐模式失败",
+                    "连续几次都被写入限流挡住，键盘可能还停在原来的灯效。\n\n"
+                    "等一秒再点一次「开始律动」即可。",
+                )
+                self.engine.stop()
+                self.engine = None
+                return
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "切换模式失败", str(e))
             self.engine.stop()
@@ -1021,6 +1030,22 @@ class MusicPage(QWidget):
         self.state_lbl.setStyleSheet(f"color:{T.OK}; font-size:11.5px;")
         self._refresh_btn()
 
+    def _set_led_retry(self, st: LedState, tries: int = 4, gap: float = 0.2) -> bool:
+        """切模式 / 恢复专用：被限流就短暂等一下再试。
+
+        这里故意用阻塞式重试 —— 调用点都是"点按钮"这种一次性动作，
+        最多多等 0.6 秒，比"点了没反应、灯卡在音乐模式"好得多。
+        """
+        for i in range(tries):
+            try:
+                if self.backend.set_led(st):
+                    return True
+            except Exception:  # noqa: BLE001
+                return False
+            if i < tries - 1:
+                time.sleep(gap)
+        return False
+
     def stop(self, restore: bool = True) -> None:
         self._timer.stop()
         self._stat_timer.stop()
@@ -1028,16 +1053,21 @@ class MusicPage(QWidget):
             self.engine.stop()
             self.engine = None
         self.bars.set_levels([0.0] * 8)
+        restored = True
         if restore and self.original is not None and self.backend is not None:
             try:
                 self.backend.policy.forget("led")
-                self.backend.set_led(self.original)
+                restored = self._set_led_retry(self.original)
             except Exception:  # noqa: BLE001
-                pass
+                restored = False
         self.original = None
         self.src_lbl.setText("采集源")
-        self.state_lbl.setText("已停止 · 灯效已恢复" if restore else "已停止")
-        self.state_lbl.setStyleSheet(f"color:{T.TEXT_MUTE}; font-size:11.5px;")
+        if restore and not restored:
+            self.state_lbl.setText("已停止 · 【注意】灯效未能恢复，去灯光页重选一次")
+            self.state_lbl.setStyleSheet(f"color:{T.WARN}; font-size:11.5px;")
+        else:
+            self.state_lbl.setText("已停止 · 灯效已恢复" if restore else "已停止")
+            self.state_lbl.setStyleSheet(f"color:{T.TEXT_MUTE}; font-size:11.5px;")
         self.stat_lbl.setText("—")
         self._refresh_btn()
 
@@ -1797,12 +1827,25 @@ class MainWindow(QMainWindow):
     def _apply_side(self, st: LedState) -> None:
         self._do(self.backend.set_sled, st, self.kbview.load_sled)
 
-    def _do(self, fn, st: LedState, preview) -> None:
+    def _do(self, fn, st: LedState, preview, attempt: int = 0) -> None:
+        """写一次灯效。**返回值必须看** —— False 表示被限流、这次没发出去。
+
+        预览先更新（拖滑块要跟手），但没发出去就在 400ms 后重试；
+        连续 3 次都不行才放弃并打印。不重试的话，
+        界面显示"已切换"而键盘还停在旧状态，而且那个值因为限流会被反复丢弃。
+        """
+        preview(st)
         try:
-            fn(st)
-            preview(st)
+            ok = fn(st)
         except Exception as e:  # noqa: BLE001
             print("写入失败:", e)
+            self._refresh()
+            return
+        if ok is False:
+            if attempt < 2:
+                QTimer.singleShot(400, lambda: self._do(fn, st, preview, attempt + 1))
+            else:
+                print("写入被限流，重试 %d 次仍未发出：%r" % (attempt, st))
         self._refresh()
 
     # ---- 托盘

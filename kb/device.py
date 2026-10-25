@@ -14,7 +14,7 @@ import time
 import hid
 
 from . import protocol as P
-from .safety import READ_ONLY
+from .safety import FORBIDDEN, READ_ONLY, UnsafeCommandError
 
 # 已知的昔涟键盘标识： (vid, pid, 说明, 连接类型)
 KNOWN_IDS = [
@@ -285,10 +285,18 @@ class Keyboard:
         USB / 2.4G：Feature Report，hidapi 的 send_feature_report 首字节即 Report ID。
         BLE       ：Output Report（Report ID 6）+ 0x55 前导。
 
-        readonly=True 时，非查询命令在本地就被拦下 —— 帧根本到不了键盘。
+        **两道闸都在这一层，任何调用路径都绕不过去**（2026-10-25 补第二道）：
+          1. FORBIDDEN 危险命令 —— 无条件拦，跟 readonly 无关
+          2. 只读模式下拦掉所有非查询命令
+        原先只有第 2 道，靠上层 `backend._send()` 里的 `assert_allowed()` 兜着；
+        但日志写着「任何调用路径都无法绕过」，而直接调 `Keyboard.send()` 就绕过了。
         """
         assert len(frame) == P.FRAME_LEN, f"帧长应为 {P.FRAME_LEN}，实际 {len(frame)}"
         cmd = frame[1]
+        if cmd in FORBIDDEN:
+            raise UnsafeCommandError(
+                f"命令 0x{cmd:02X} 已被安全策略禁止：{FORBIDDEN[cmd]}"
+            )
         if self.readonly and cmd not in READ_ONLY:
             raise RuntimeError(
                 f"只读模式：拒绝发送非查询命令 0x{cmd:02X}（帧未发出）"
