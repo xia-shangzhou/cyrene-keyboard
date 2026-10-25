@@ -51,16 +51,19 @@ class FakeHid:
     假设备只负责记录「到底发没发」，这样测出来的才是真实行为。
     """
 
-    def __init__(self, reply: bytes | None = None):
+    def __init__(self, reply=None):
         self.frames: list[bytes] = []
-        self.reply = reply
+        self.reply = reply          # bytes = 固定回应；list = 按序取，最后一个一直用
         self.readonly = False
 
     def send(self, frame: bytes) -> None:
         self.frames.append(bytes(frame))
 
     def query(self, cmd, params=None, *, bit8=False, retries=1):
-        return self.reply
+        r = self.reply
+        if isinstance(r, list):
+            return r.pop(0) if len(r) > 1 else (r[0] if r else None)
+        return r
 
     def config_alive(self, wait=None) -> bool:
         return True
@@ -70,19 +73,34 @@ class FakeHid:
 
 
 class FakeDev:
-    """假 hidapi device：记录写入，供 Keyboard.send 测试用。"""
+    """假 hidapi device：记录写入，供 Keyboard.send / config_alive 测试用。"""
 
-    def __init__(self):
+    def __init__(self, feature_reply=None, read_reply=None):
         self.writes: list[bytes] = []
         self.features: list[bytes] = []
+        self.feature_reply = feature_reply    # None = 原样回显刚发的帧
+        self.read_reply = read_reply
+        self.feature_calls = 0
 
     def send_feature_report(self, data) -> int:
         self.features.append(bytes(data))
         return len(data)
 
+    def get_feature_report(self, report_id, length) -> list[int]:
+        self.feature_calls += 1
+        if self.feature_reply is None:
+            return list(self.features[-1])          # 完整回显
+        return list(self.feature_reply)
+
     def write(self, data) -> int:
         self.writes.append(bytes(data))
         return len(data)
+
+    def read(self, length, timeout_ms=100):
+        # 排空阶段（还没写任何东西）返回空，写完才"收到"通知 —— 贴近真实时序
+        if not self.writes or self.read_reply is None:
+            return []
+        return list(self.read_reply)
 
     def close(self) -> None:
         pass
@@ -218,6 +236,82 @@ def test_echo_and_missing() -> None:
           f"{st.mode_name if st else None}")
 
 
+# ---------------------------------------------------------------- 8-11 配置可用性误判
+
+GOOD_LED = bytes([0, 0x87, 0x05, 0x02, 0x01, 0x08, 255, 255, 255] + [0] * 56)
+
+
+def make_kb(readonly=False, ble=False, dev=None) -> Keyboard:
+    kb = Keyboard.__new__(Keyboard)          # 不走 __init__，不碰真设备
+    kb.path = b"fake"
+    kb.readonly = readonly
+    kb.ble = ble
+    kb.dev = dev or FakeDev()
+    kb.vid = kb.pid = 0
+    kb.product = ""
+    kb.link = "ble" if ble else "usb"
+    kb.auto_detected = False
+    return kb
+
+
+def test_read_throttle_not_counted_as_failure() -> None:
+    print("\n8. 本地读限流不能被当成硬件故障")
+    b = make_backend(FakeHid(reply=GOOD_LED))
+    b.policy.read_interval = 0.5        # 拉长读频控，制造"连续被限流"
+
+    check("首次读到有效数据", b.get_led() is not None)
+    for _ in range(5):                  # 全在限流窗口内，一帧都没发
+        b.get_led()
+    check("连续 5 次本地限流后 config_ok 仍为 True", b.config_ok is True,
+          f"config_ok={b.config_ok}")
+    check("本地限流没有增加失败计数", b._config_fail == 0, f"_config_fail={b._config_fail}")
+
+
+def test_real_invalid_response_still_fails() -> None:
+    print("\n9. 真实无效响应仍会判定配置不可用（别把判据放宽了）")
+    b = make_backend(FakeHid(reply=bytes(P.FRAME_LEN)))   # 全零帧
+    b.policy.read_interval = 0.0
+    for _ in range(3):
+        b.get_led()
+    check("3 次全零帧后 config_ok=False", b.config_ok is False)
+    check("失败计数达到 3", b._config_fail == 3, f"_config_fail={b._config_fail}")
+
+
+def test_valid_response_resets_fail_count() -> None:
+    print("\n10. 一次有效响应后失败计数归零")
+    b = make_backend(FakeHid(reply=[bytes(P.FRAME_LEN), bytes(P.FRAME_LEN), GOOD_LED]))
+    b.policy.read_interval = 0.0
+    b.get_led(); b.get_led()
+    check("两次失败后还没判定不可用", b.config_ok is True and b._config_fail == 2,
+          f"_config_fail={b._config_fail}")
+    b.get_led()
+    check("有效响应后归零", b._config_fail == 0, f"_config_fail={b._config_fail}")
+
+
+def test_config_alive_rejects_echo() -> None:
+    print("\n11. config_alive 必须把「完整回显」判为不可用")
+    # USB：设备把请求原样丢回来
+    kb = make_kb(dev=FakeDev())                 # feature_reply=None → 回显
+    check("USB 完整回显 → 不可用", kb.config_alive(wait=0.0) is False)
+    check("确实探了两次才下结论", kb.dev.feature_calls == 2,
+          f"探测次数={kb.dev.feature_calls}")
+
+    # USB：正常数据 → 可用
+    kb2 = make_kb(dev=FakeDev(feature_reply=GOOD_LED))
+    check("USB 正常数据 → 可用", kb2.config_alive(wait=0.0) is True)
+
+    # BLE：归一化之后正好等于请求
+    req = P.build(P.Cmd.GET_LEDPARAM, None, bit8=True)
+    echo_notify = [6, 0x55] + list(req[1:])
+    kb3 = make_kb(ble=True, dev=FakeDev(read_reply=echo_notify))
+    check("BLE 归一化后回显 → 不可用", kb3.config_alive(wait=0.01) is False)
+
+    # BLE：正常数据 → 可用
+    kb4 = make_kb(ble=True, dev=FakeDev(read_reply=[6, 0x55, 0x87, 0x05, 0x02,
+                                                    0x01, 0x08, 255, 255, 255]))
+    check("BLE 正常数据 → 可用", kb4.config_alive(wait=0.01) is True)
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main() -> int:
@@ -230,6 +324,10 @@ def main() -> int:
     test_forbidden_at_device_layer()
     test_perkey_disabled()
     test_echo_and_missing()
+    test_read_throttle_not_counted_as_failure()
+    test_real_invalid_response_still_fails()
+    test_valid_response_resets_fail_count()
+    test_config_alive_rejects_echo()
 
     print("\n" + "=" * 70)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

@@ -245,11 +245,13 @@ class Keyboard:
     def config_alive(self, wait: float | None = None) -> bool:
         """探测这条通道是否真的转发配置命令。
 
-        三重判据，缺一不可：
+        四重判据，缺一不可：
           1. 有响应帧
           2. **响应第 1 字节等于命令码** —— 2.4G 下 dongle 的缓存槽会把它存的上一条
              响应（比如电量 100）原样吐回来，不校验命令码就会被骗
-          3. 不是全零
+          3. **不是把请求原样回显** —— 不支持该命令的通道会原样返回 req，
+             只看命令码+非零会把它误判成可用
+          4. 不是全零
 
         用 GET_LEDPARAM 而不是 GET_USB_VERSION 探测：GET 命令的响应一定回显命令码，
         校验最可靠。
@@ -272,8 +274,13 @@ class Keyboard:
                     resp = self.dev.get_feature_report(P.REPORT_ID, P.FRAME_LEN)
             except Exception:  # noqa: BLE001
                 resp = None
+            # 判据四重：有响应 → 命令码对 → **不是把请求原样回显** → 不全零。
+            # 回显这条不能省：不支持该命令的通道会把 req 原样丢回来，
+            # 只看命令码和非零的话，这种"假通道"会被判成可用，界面短暂开放写入。
+            # BLE 的 resp 已被 ble_normalize 归一化成和 req 同形状，所以可以直接比。
             if resp and len(resp) >= 3 and resp[1] == P.Cmd.GET_LEDPARAM:
-                if not all(b == 0 for b in resp[:8]):
+                same_as_req = bytes(resp) == bytes(req)
+                if not same_as_req and not all(b == 0 for b in resp[:8]):
                     return True
             if attempt == 0:
                 time.sleep(0.08)

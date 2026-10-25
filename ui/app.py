@@ -674,6 +674,15 @@ class MusicPage(QWidget):
         self._stat_timer.setInterval(250)
         self._stat_timer.timeout.connect(self._update_stat)
 
+        # 运行中调参数（亮度/响应/样式）的补发定时器。
+        # 350ms 写限流会让连续调整丢掉中间某次，所以只保留**最新目标**，失败了再补发。
+        self._pending_target: LedState | None = None
+        self._flush_tries = 0
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(220)
+        self._flush_timer.timeout.connect(self._flush_target)
+
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
@@ -864,14 +873,43 @@ class MusicPage(QWidget):
         )
 
     def _apply_params(self) -> None:
-        """参数变化时只重发灯效参数（不动音频流）。"""
+        """参数变化时只重发灯效参数（不动音频流）。
+
+        **只保证最新目标最终落到键盘上**：每次覆盖 `_pending_target`，
+        写入被限流就 220ms 后补发；连续调整时旧的定时器会被新目标取代，
+        不会出现"最后一次调整被之前的重试盖掉"。
+        """
         b = self.backend
         if not b or not self.running:
             return
+        self._pending_target = self._music_state()
+        self._flush_tries = 0
+        self._flush_target()
+
+    def _flush_target(self) -> None:
+        st = self._pending_target
+        b = self.backend
+        if st is None or not b or not self.running:
+            return
         try:
-            b.set_led(self._music_state())
-        except Exception:  # noqa: BLE001
-            pass
+            ok = bool(b.set_led(st))
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print("律动调参写入失败:", e)
+        if ok:
+            self._pending_target = None
+            self.state_lbl.setText("运行中 · 参数已更新")
+            self.state_lbl.setStyleSheet(f"color:{T.TEXT_MUTE}; font-size:11.5px;")
+            return
+
+        self._flush_tries += 1
+        if self._flush_tries < 6:
+            self._flush_timer.start()
+        else:
+            # 不能无限重试，也不能静默 —— 告诉用户这次没生效
+            self._pending_target = None
+            self.state_lbl.setText("运行中 · 【注意】参数写入未生效，请再调一次")
+            self.state_lbl.setStyleSheet(f"color:{T.WARN}; font-size:11.5px;")
 
     def _on_param(self, *_a) -> None:
         if self.engine:
@@ -1050,6 +1088,8 @@ class MusicPage(QWidget):
     def stop(self, restore: bool = True) -> None:
         self._timer.stop()
         self._stat_timer.stop()
+        self._flush_timer.stop()
+        self._pending_target = None
         if self.engine:
             self.engine.stop()
             self.engine = None
@@ -1079,7 +1119,7 @@ class MusicPage(QWidget):
             self._timer.stop()
             return
         try:
-            b.set_audio_viz(eng.snapshot())
+            sent = b.set_audio_viz(eng.snapshot())
         except Exception as e:  # noqa: BLE001
             self.stop(restore=False)
             self.state_lbl.setText(f"发送中断：{e}")
@@ -1087,7 +1127,10 @@ class MusicPage(QWidget):
             return
         lv = eng.levels()
         self.bars.set_levels(lv)
-        self._frames += 1
+        # 只统计**真的发出去**的帧。被限流跳过的那一帧不算，
+        # 否则"已推帧"会把没发出去的也算进去，指标就撒谎了。
+        if sent:
+            self._frames += 1
         # 连续没信号，多半是采集源和实际出声的设备不是同一个
         self._silent_ticks = self._silent_ticks + 1 if max(lv) < 0.002 else 0
 
@@ -1343,7 +1386,8 @@ class AboutPage(QWidget):
         ("亮度 / 速度 / 方向", "各 0-4 档，方向可选正反向"),
         ("颜色", "HSV 色轮取色 + 10 个预设色块，支持彩虹循环"),
         ("侧面灯条", "与主键盘独立的第二路灯光，参数单独调"),
-        ("逐键 RGB", "按店铺实物分区上色，支持整片涂色（待解锁）"),
+        ("逐键 RGB", "固件不支持读回、帧格式未验证，本程序不写入。"
+                     "键盘自带录制：Fn+Z/X/C → Fn+V 开始 → 点键 → Fn+V 保存"),
         ("快捷键速查", "说明书 FN 组合键整理成表，多媒体键可直接点执行"),
         ("系统托盘", "关窗口缩到托盘，右键快速切灯效"),
     ]
@@ -1747,11 +1791,14 @@ class MainWindow(QMainWindow):
         locking = not getattr(b, "readonly", True)
 
         if locking:
+            # ⚠ 顺序：**先恢复灯效，再上锁**。上锁以后就没有写权限了，
+            # 以前是先上锁再 stop(restore=False)，结果是键盘永远停在音乐灯效。
+            if self.page_music.running:
+                self.page_music.stop(restore=True)
             b.readonly = True
             b.policy.strict_readonly = True
             if b.kb:
                 b.kb.readonly = True
-            self.page_music.stop(restore=False)
             self.page_led.set_readonly(True)
             self.page_sled.set_readonly(True)
             self.page_music.set_readonly(True)
@@ -1883,18 +1930,54 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _quick(self, mid: int) -> None:
+        """托盘右键快捷切灯效。
+
+        三条硬规矩（2026-10-25 按审查意见修）：
+          1. **读不到当前状态就不切** —— 以前用 `LedState(mode=mid)` 兜底，
+             等于把速度 2 / 亮度 4 / 单色红 一起写进去，直接把用户的灯效覆盖掉
+          2. 有可信状态也只改 mode，其余参数原样带过去（复制，别动缓存对象）
+          3. 只有真的写成功才更新界面；失败要明确告诉用户，不能装作切了
+        """
         try:
             st = self.backend.get_led() or self._last_led
-            if st is None:
-                # 读不到就用默认值兜底，只改模式，别把亮度/颜色写成瞎猜的
-                st = LedState(mode=mid)
-            else:
-                st.mode = mid
-            self.backend.set_led(st)
-            self.page_led.load(st)
-            self.kbview.load(st)
         except Exception as e:  # noqa: BLE001
-            print("快捷切换失败:", e)
+            print("快捷切换：读状态失败", e)
+            st = self._last_led
+
+        if st is None:
+            if self.tray:
+                self.tray.showMessage(
+                    APP_NAME, "读不到当前灯效，本次未切换。\n请先打开主窗口看一眼。",
+                    QSystemTrayIcon.Warning, 3000)
+            return
+
+        # 从音乐模式切走 → 先停律动，否则它会继续推流把灯抢回去
+        if self.page_music.running and mid not in P.AUDIO_MODES:
+            self.page_music.stop(restore=False)
+
+        target = LedState(**st.__dict__)     # 复制一份，别原地改缓存
+        target.mode = mid
+
+        ok = False
+        for _ in range(3):
+            try:
+                if self.backend.set_led(target):
+                    ok = True
+                    break
+            except Exception as e:  # noqa: BLE001
+                print("快捷切换失败:", e)
+                break
+            time.sleep(0.2)                   # 写限流 350ms，等一轮再试
+
+        if ok:
+            self._last_led = target
+            self.page_led.load(target)
+            self.kbview.load(target)
+            self._refresh()
+        elif self.tray:
+            self.tray.showMessage(
+                APP_NAME, "灯效切换未生效（写入被限流或失败），请稍后再试一次。",
+                QSystemTrayIcon.Warning, 3000)
 
     def closeEvent(self, ev) -> None:
         if self.tray:

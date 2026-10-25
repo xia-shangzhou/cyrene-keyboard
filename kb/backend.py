@@ -16,6 +16,14 @@ from . import protocol as P
 from .safety import SafetyPolicy, UnsafeCommandError
 
 
+class QueryThrottled(RuntimeError):
+    """本地读频控把这次读取跳过了（没往设备发任何东西）。
+
+    ⚠ 绝不能当成"设备读不到"—— 那会把正常的 USB/蓝牙误判成配置不可用。
+    只有"真的发出去了但响应无效/没响应"才算读失败。
+    """
+
+
 # ---------------------------------------------------------------- 数据模型
 
 @dataclass
@@ -163,7 +171,10 @@ class HidBackend(Backend):
         if not self.kb:
             raise RuntimeError("未连接")
         if not self.policy.may_send(cmd):
-            return None
+            # 本地频控跳过 —— **这不是设备故障**，必须和"设备没响应"区分开。
+            # 以前这里返回 None，调用方把它当成读失败记账，连续 3 次就会把
+            # config_ok 置 False，好端端的 USB/蓝牙被误判成"配置不可用"。
+            raise QueryThrottled()
         self.policy.note_read()
         return self.kb.query(cmd, params, bit8=bit8)
 
@@ -234,7 +245,10 @@ class HidBackend(Backend):
         if not self.config_ok:
             return None
         req = P.build(P.Cmd.GET_LEDPARAM, None, bit8=True)
-        resp = self._query(P.Cmd.GET_LEDPARAM, bit8=True)
+        try:
+            resp = self._query(P.Cmd.GET_LEDPARAM, bit8=True)
+        except QueryThrottled:
+            return None          # 本地频控跳过，不记账（见 QueryThrottled 注释）
         if not resp or len(resp) < 9 or self._is_echo(req, resp):
             self._mark_read_fail()
             return None
@@ -266,7 +280,10 @@ class HidBackend(Backend):
         if not self.config_ok:
             return None
         req = P.build(P.Cmd.GET_SLEDPARAM, None, bit8=True)
-        resp = self._query(P.Cmd.GET_SLEDPARAM, bit8=True)
+        try:
+            resp = self._query(P.Cmd.GET_SLEDPARAM, bit8=True)
+        except QueryThrottled:
+            return None          # 本地频控跳过，不记账
         if not resp or len(resp) < 9 or self._is_echo(req, resp):
             self._mark_read_fail()
             return None
