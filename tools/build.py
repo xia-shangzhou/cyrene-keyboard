@@ -89,6 +89,12 @@ README_TXT = """Cyrene Keyboard v{ver}
 这是正常的 —— 程序没有买代码签名证书。
 点「更多信息」→「仍要运行」即可，之后不会再提示。
 
+【如果 exe 根本跑不起来】
+exe 双击没反应、被杀软删掉、或者 Windows 11 提示「智能应用控制已阻止」：
+请改用同一个发布页上的 **CyreneKeyboard-Portable-v{ver}.zip**（Python 源码版），
+功能完全一样，解压后双击「双击启动.vbs」即可，几乎不会被安全软件拦。
+下载页：https://github.com/xia-shangzhou/cyrene-keyboard/releases/latest
+
 【删掉就是卸载】
 不写注册表、不装服务。删掉整个文件夹 + 桌面快捷方式即可。
 

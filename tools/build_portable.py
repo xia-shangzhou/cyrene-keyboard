@@ -138,9 +138,11 @@ def copy_deps() -> None:
         if not s.exists():
             print(f"  [跳过] 源环境里没有 {name}")
             continue
-        if d.exists():
-            shutil.rmtree(d)
-        shutil.copytree(s, d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # 不先 rmtree：一次删上千个文件会被沙箱/杀软的"批量删除"规则拦下（报
+        # SAFE_DELETE_BULK_CONFIRM_REQUIRED，numpy 目录 957 个文件正好踩中）。
+        # 依赖版本固定，直接覆盖写即可，重复跑还能自动补齐上次中断的残缺文件。
+        shutil.copytree(s, d, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         print(f"  依赖 {name}")
     for name in SITE_FILES:
         s = src_sp / name
