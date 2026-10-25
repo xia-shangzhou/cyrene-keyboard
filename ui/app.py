@@ -1094,6 +1094,9 @@ class MusicPage(QWidget):
             self.engine.stop()
             self.engine = None
         self.bars.set_levels([0.0] * 8)
+        kv = getattr(self.window(), "kbview", None)
+        if kv is not None:
+            kv.clear_music()          # 停止后恢复普通灯效渲染
         restored = True
         if restore and self.original is not None and self.backend is not None:
             try:
@@ -1103,6 +1106,14 @@ class MusicPage(QWidget):
                 restored = False
         self.original = None
         self.src_lbl.setText("采集源")
+        # 停止后把预览刷回真实灯效：否则大键盘图还停在音乐模式那张兜底渐变上，
+        # 看着像"灯还亮着"，其实键盘已经恢复成涟漪了
+        win = self.window()
+        if kv is not None and hasattr(win, "_reload"):
+            try:
+                win._reload()
+            except Exception:  # noqa: BLE001
+                pass
         if restore and not restored:
             self.state_lbl.setText("已停止 · 【注意】灯效未能恢复，去灯光页重选一次")
             self.state_lbl.setStyleSheet(f"color:{T.WARN}; font-size:11.5px;")
@@ -1127,6 +1138,11 @@ class MusicPage(QWidget):
             return
         lv = eng.levels()
         self.bars.set_levels(lv)
+        # 把同一份电平喂给大键盘预览：固件只画 8 列且横向样式不亮，
+        # 界面这边三种样式都画，用户至少能在软件里看清律动长什么样。
+        kv = getattr(self.window(), "kbview", None)
+        if kv is not None:
+            kv.set_music(lv, self.style)
         # 只统计**真的发出去**的帧。被限流跳过的那一帧不算，
         # 否则"已推帧"会把没发出去的也算进去，指标就撒谎了。
         if sent:

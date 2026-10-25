@@ -184,6 +184,52 @@ def effect_color(mode: int, k: L.Key, t: float, st: LedState) -> QColor:
     return scale(base, 0.35 + 0.5 * (0.5 + 0.5 * math.sin(phase + nx * 5)))
 
 
+def music_color(k: L.Key, bands: list[float], style: int, bright: int) -> QColor:
+    """音乐律动时单个键的颜色。
+
+    固件只画 8 列、固定彩虹、纵向柱；横向两种样式实测在键盘上不亮，
+    所以预览这边把三种样式**都实现**，让用户至少能在界面上看清律动长什么样。
+
+    坐标口径：主键区 0~14.25u、6 行；功能/编辑/数字区不参与律动（固件也不点亮那里）。
+    """
+    MAIN_W = 14.25
+    ROWS = 6
+    cx = k.x + k.w / 2
+    cy = k.y + k.h / 2
+
+    # 不参与律动的区域：压到很暗，但仍保留键帽轮廓
+    if cx > MAIN_W + 0.6:
+        return QColor(46, 42, 50)
+
+    lv_of = lambda i: bands[max(0, min(len(bands) - 1, i))]      # noqa: E731
+    on = False
+    hue = 0.0
+
+    if style == 0:                                  # 竖向柱 · 自下而上
+        col = min(7, int(cx / MAIN_W * 8))
+        level = lv_of(col)
+        rows_from_bottom = ROWS - (k.y + k.h)        # 0 = 最底行，5 = 最顶行
+        on = (rows_from_bottom + 1) <= level * ROWS + 0.02
+        hue = col / 8.0
+    elif style == 1:                                # 横向 · 从中间向两边
+        row = min(5, int(cy))
+        level = lv_of(int(row * 8 / ROWS))
+        dist = abs(cx - MAIN_W / 2) / (MAIN_W / 2)   # 0 = 中间，1 = 最外侧
+        on = dist <= level + 0.02
+        hue = dist * 0.5 + 0.5
+    else:                                           # 横向 · 从左向右
+        row = min(5, int(cy))
+        level = lv_of(int(row * 8 / ROWS))
+        on = (cx / MAIN_W) <= level + 0.02
+        hue = cx / MAIN_W
+
+    if not on:
+        # 灭掉的键给一点点冷灰，别全黑 —— 全黑会让人以为界面卡住了
+        return QColor(52, 47, 56)
+    v = 0.62 + 0.10 * max(0, min(4, bright))
+    return hsv_color(hue, 0.78, min(1.0, v))
+
+
 class KeyboardView(QWidget):
     """108 键俯视图 + 实时灯效 + 底部侧灯条。"""
 
@@ -197,6 +243,9 @@ class KeyboardView(QWidget):
         self.highlight = "main"        # main / sled：高亮哪一路通道
         self.unknown = False           # True = 读不到键盘状态，别画成"某种灯效"
         self.sled_unknown = False
+        # 音乐律动：有数据时盖掉普通灯效渲染（None = 不在律动）
+        self.bands: list[float] | None = None
+        self.music_style = 0
 
         self.timer = QTimer(self)
         self.timer.setInterval(33)          # ~30fps，够顺滑也不费 CPU
@@ -207,6 +256,16 @@ class KeyboardView(QWidget):
         self.setMouseTracking(True)
 
     # ---- 外部接口
+    def set_music(self, bands: list[float] | None, style: int = 0) -> None:
+        """律动运行中每帧调用；传 None 表示停止，回到普通灯效渲染。"""
+        self.bands = list(bands) if bands is not None else None
+        self.music_style = style
+        if self.bands is not None:
+            self.update()
+
+    def clear_music(self) -> None:
+        self.set_music(None)
+
     def load(self, st: LedState) -> None:
         self.state = LedState(**st.__dict__)
         self.unknown = False
@@ -243,7 +302,10 @@ class KeyboardView(QWidget):
         """只有"会动的灯效"才需要 30fps 重绘。
 
         关闭(0) / 常亮(1) 是静态的，重绘纯浪费——笔记本上用这两种模式的人不少。
+        律动在跑时必须重绘，否则柱子会冻在某一帧。
         """
+        if self.bands is not None:
+            return True
         return self.state.mode not in (0, 1) or self.sled.mode not in (0, 1)
 
     def _tick(self) -> None:
@@ -321,11 +383,15 @@ class KeyboardView(QWidget):
             rect = QRectF(x, y, w, h)
             rad = s * L.RADIUS
 
-            col = effect_color(self.state.mode, k, t, self.state)
-            if self.unknown:
-                # 读不到键盘状态时不要画成"某种灯效"—— 那会把"未知"伪装成事实。
-                # 统一画成中性灰，配合界面上的告警文字表示"这里没数据"
-                col = QColor(196, 192, 198)
+            col = (music_color(k, self.bands, self.music_style, self.state.brightness)
+                   if self.bands is not None else None)
+            if col is None:
+                if self.unknown:
+                    # 读不到键盘状态时不要画成"某种灯效"—— 那会把"未知"伪装成事实。
+                    # 统一画成中性灰，配合界面上的告警文字表示"这里没数据"
+                    col = QColor(196, 192, 198)
+                else:
+                    col = effect_color(self.state.mode, k, t, self.state)
 
             # 用最大通道而非加权亮度：否则纯蓝/纯紫这类灯的「亮度」会被算得很低，
             # 明明亮着却不给键帽染色，彩虹就只剩粉色段
