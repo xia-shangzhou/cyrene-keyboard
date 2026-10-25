@@ -1,0 +1,110 @@
+[
+ {
+  "key": "093A:0255",
+  "usage_page": 1,
+  "usage": 2,
+  "product": "HIDI2C Device"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 65519,
+  "usage": 0,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "093A:0255",
+  "usage_page": 13,
+  "usage": 5,
+  "product": "HIDI2C Device"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 1,
+  "usage": 6,
+  "product": "Air 108 metallic"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 1,
+  "usage": 2,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "093A:0255",
+  "usage_page": 13,
+  "usage": 14,
+  "product": "HIDI2C Device"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 12,
+  "usage": 1,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 1,
+  "usage": 128,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 1,
+  "usage": 0,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 65280,
+  "usage": 14,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "24AE:187B",
+  "usage_page": 1,
+  "usage": 6,
+  "product": "Rapoo 2.4G Wireless Device"
+ },
+ {
+  "key": "093A:0255",
+  "usage_page": 65280,
+  "usage": 1,
+  "product": "HIDI2C Device"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 12,
+  "usage": 1,
+  "product": "Air 108 metallic"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 65535,
+  "usage": 2,
+  "product": "Air 108 metallic"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 1,
+  "usage": 128,
+  "product": "Air 108 metallic"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 1,
+  "usage": 6,
+  "product": "Air 108 metallic"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 1,
+  "usage": 2,
+  "product": "Air 108 metallic"
+ },
+ {
+  "key": "38A9:0017",
+  "usage_page": 65535,
+  "usage": 1,
+  "product": "Air 108 metallic"
+ }
+]
