@@ -2,11 +2,18 @@
 打包成 exe（onedir，文件夹 + exe）。
 
     python tools/build.py            # 打包
-    python tools/build.py --zip      # 打包完顺便压成 zip（带"创建快捷方式.vbs"）
+    python tools/build.py --zip      # 打包完顺便压成 zip（说明放进 CyreneKeyboard/ 里）
 
 产物：
-    build/exe/CyreneKeyboard/CyreneKeyboard.exe   ← 直接跑这个
-    dist/CyreneKeyboard-v<版本>-win64.zip         ← --zip 时生成
+    build/pyi-<时间戳>/CyreneKeyboard/CyreneKeyboard.exe   ← 直接跑这个
+    dist/CyreneKeyboard-v<版本>-win64.zip                   ← --zip 时生成
+
+为什么是"文件夹里塞一份说明"而不是桌面快捷方式 vbs
+----------------------------------------------------
+vbs 建快捷方式要在对方机器上跑 WScript.Shell，而 `cscript`/`WScript.Shell` 恰好是
+安全软件重点盯的 LOLBin，被杀软按脚本拦截的概率比程序本身还高；而且本机
+（作者机器）策略就把 cscript 拦了，等于发出去的东西自己都没跑过一遍。
+→ 只放一个 GBK+CRLF 的纯文本说明在 exe 旁边，双击 exe 就能用，没有第二层依赖。
 
 为什么用 onedir 而不是 onefile
 ------------------------------
@@ -55,35 +62,14 @@ EXCLUDES = [
     "tkinter", "matplotlib", "PIL", "pytest", "IPython", "notebook",
 ]
 
-SHORTCUT_VBS = """' 双击本文件，在桌面创建「Cyrene Keyboard」快捷方式
-Option Explicit
-Dim sh, fso, base, exe, lnk
-Set sh = CreateObject("WScript.Shell")
-Set fso = CreateObject("Scripting.FileSystemObject")
-base = fso.GetParentFolderName(WScript.ScriptFullName)
-exe = base & "\\CyreneKeyboard\\CyreneKeyboard.exe"
-If Not fso.FileExists(exe) Then
-    MsgBox "找不到程序文件，请先完整解压整个压缩包。" & vbCrLf & exe, 16, "Cyrene Keyboard"
-    WScript.Quit 1
-End If
-lnk = sh.SpecialFolders("Desktop") & "\\Cyrene Keyboard.lnk"
-Dim s
-Set s = sh.CreateShortcut(lnk)
-s.TargetPath = exe
-s.WorkingDirectory = base & "\\CyreneKeyboard"
-s.IconLocation = exe & ",0"
-s.Description = "昔涟键盘控制台"
-s.Save
-MsgBox "已在桌面创建快捷方式。" & vbCrLf & vbCrLf & lnk, 64, "Cyrene Keyboard"
-"""
-
-README_TXT = """Cyrene Keyboard v{ver}
+README_TXT = """Cyrene Keyboard v{ver} · 使用说明
 ================================
 
 【怎么用】
-1. 双击「创建快捷方式.vbs」，桌面会出现 Cyrene Keyboard 图标（只需做一次）
-2. 以后从桌面图标启动；也可以直接双击 CyreneKeyboard\\CyreneKeyboard.exe
-3. 整个文件夹可以放到任意位置，但**别只拷 exe**，旁边的 _internal 是运行必需的
+1. 打开文件夹，双击 CyreneKeyboard.exe 就能用，不需要安装
+2. 想放桌面：右键 CyreneKeyboard.exe →「发送到」→「桌面快捷方式」（只需做一次）
+3. 整个 CyreneKeyboard 文件夹可以放到任意位置，但**别只拷 exe**，
+   旁边的 _internal 文件夹是运行必需的，少了打不开
 
 【首次运行提示"未知发布者"】
 这是正常的 —— 程序没有买代码签名证书。
@@ -154,27 +140,43 @@ def package() -> Path | None:
     if out.exists():
         out.unlink()
 
-    write_gbk(app_dir.parent / "创建快捷方式.vbs", SHORTCUT_VBS)
-    write_gbk(app_dir.parent / "使用说明.txt", README_TXT.format(ver=APP_VERSION))
+    # 说明直接放进 exe 所在文件夹：双击 exe 就能用，不需要先跑脚本建快捷方式。
+    # （vbs 建快捷方式要 WScript.Shell，正是杀软重点拦的 LOLBin，发出去自己也验证不了）
+    write_gbk(app_dir / "使用说明.txt", README_TXT.format(ver=APP_VERSION))
 
-    top = "CyreneKeyboard-win64"
+    # zip 根目录就叫 CyreneKeyboard/，少一层 "xxx-win64/CyreneKeyboard" 的套娃
     total = 0
     print(f"压缩 → {out.name}（文件多，慢一点）")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for f in sorted(app_dir.parent.rglob("*")):
+        for f in sorted(app_dir.rglob("*")):
             if f.is_dir():
                 continue
             total += f.stat().st_size
-            z.write(f, f"{top}/{f.relative_to(app_dir.parent).as_posix()}")
+            z.write(f, f.relative_to(app_dir.parent).as_posix())
     print(f"  原始 {total / 1024 / 1024:.0f} MB → 压缩后 {out.stat().st_size / 1024 / 1024:.0f} MB")
     return out
 
 
 def main() -> int:
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--zip", action="store_true", help="打包后压成 zip")
-    ap.add_argument("--skip-build", action="store_true", help="跳过 PyInstaller，只重新压 zip")
+    ap.add_argument("--skip-build", action="store_true",
+                    help="跳过 PyInstaller，只重新压 zip（自动用最近一次的 build/pyi-*）")
     args = ap.parse_args()
+
+    if args.skip_build:
+        # 目录名带时间戳，所以"只重压"必须显式找回最近一次产物，否则会算出一个空目录
+        cands = sorted(
+            (p for p in (ROOT / "build").glob("pyi-*")
+             if (p / APP_NAME / f"{APP_NAME}.exe").exists()),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if not cands:
+            print("[错误] build/pyi-* 里没有可复用的产物，去掉 --skip-build 重跑")
+            return 2
+        OUT = cands[0]
+        print(f"复用已有产物：{OUT}")
 
     print("=" * 66)
     print(f"打包 exe v{APP_VERSION}（onedir）")
@@ -196,7 +198,7 @@ def main() -> int:
         out = package()
         if out:
             print(f"\n✅ 分发包: {out}")
-            print("   解压后先双击「创建快捷方式.vbs」")
+            print("   解压后进 CyreneKeyboard 文件夹，双击 CyreneKeyboard.exe（说明书就在旁边）")
     return 0
 
 

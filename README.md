@@ -56,7 +56,7 @@
 
 | 包 | 体积 | 怎么启动 | 说明 |
 |---|---|---|---|
-| `CyreneKeyboard-v*-win64.zip` | ~60 MB | 解压 → 双击 `创建快捷方式.vbs`，或直接跑 `CyreneKeyboard\CyreneKeyboard.exe` | **exe 版，推荐先试这个** |
+| `CyreneKeyboard-v*-win64.zip` | ~60 MB | 解压 → 进 `CyreneKeyboard` 文件夹，双击 `CyreneKeyboard.exe` | **exe 版，推荐先试这个**（说明就在旁边） |
 | `CyreneKeyboard-Portable-v*.zip` | ~105 MB | 解压 → 双击 `双击启动.vbs` | **Python 源码版，exe 用不了就换这个** |
 
 ### 哪个能用就用哪个
