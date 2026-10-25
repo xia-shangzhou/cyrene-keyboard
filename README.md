@@ -10,7 +10,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-2DBE8A?style=flat-square)](#下载安装)
 [![Use](https://img.shields.io/badge/use-%E4%B8%AA%E4%BA%BA%E9%9D%9E%E5%95%86%E4%B8%9A-E8A23D?style=flat-square)](#声明)
 
-![主界面](docs/preview_0_灯光.png)
+![主界面](docs/live_灯光.png)
 
 ---
 
@@ -111,17 +111,3 @@ exe 没有代码签名，Windows 11 的「智能应用控制」会直接拦下�
 **非官方项目**，与米哈游 / 腹灵无任何关联。图标为同人创作，角色版权归 miHoYo 所有，
 仅用于个人非商业用途。程序本身不含任何游戏资源，也不会偷偷联网
 （除了你主动点「检查更新」）。
-
----
-
-<details>
-<summary>开发者 / 技术细节</summary>
-
-完整技术笔记都在 **[工作日志.md](工作日志.md)** —— 三种连接的实测结论、踩过的坑、
-每一步为什么这么做，都记在里面。
-
-一句话概括：用户态 HID 程序，不装内核驱动。有线走 Feature Report，
-蓝牙走 GATT 的 Output Report + Input 通知。源码在 `kb/` 与 `ui/`，
-自带四套自检（`tools/`）。想改的话，先读日志。
-
-</details>

@@ -227,7 +227,8 @@ class Sidebar(QWidget):
         self.buttons[0].setChecked(True)
         lay.addStretch(1)
 
-        ver = QLabel("v0.3")
+        # 版本号只从 kb/update.py 取，别再硬编码（原来写死 "v0.3"，升版本忘了改）
+        ver = QLabel(U.APP_VERSION_LABEL)
         ver.setObjectName("caption")
         ver.setAlignment(Qt.AlignCenter)
         lay.addWidget(ver)

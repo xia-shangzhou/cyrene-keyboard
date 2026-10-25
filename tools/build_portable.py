@@ -120,7 +120,8 @@ def copy_code(clean: bool) -> None:
             if f.is_file():
                 shutil.copy2(f, dst / f.name)
         print(f"  资源 assets/  {len(list(dst.iterdir()))} 个文件")
-    for extra in ("README.md", "工作日志.md"):
+    # 只发 README；工作日志是本地留档（含硬件身份/协议细节），不进仓库也不进分发包
+    for extra in ("README.md",):
         src = ROOT / extra
         if src.exists():
             shutil.copy2(src, PORTABLE / extra)

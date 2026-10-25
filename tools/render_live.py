@@ -32,6 +32,12 @@ for _ in range(8):                  # 让灯效动画跑几帧
 
 out = ROOT / "docs"
 out.mkdir(exist_ok=True)
+
+# 截图用：只读模式会把灯效卡片整块置灰（Qt 禁用态），缩略图变成灰条纹，很难看。
+# 这里只把控件**启用**用于渲染，`hb.readonly` 仍是 True，全程不会写键盘。
+w.page_led.set_readonly(False)
+w.page_sled.set_readonly(False)
+
 for i, name in enumerate(["灯光", "侧灯", "律动", "逐键", "快捷键", "连接", "关于"]):
     w._nav(i)
     if name == "律动":
