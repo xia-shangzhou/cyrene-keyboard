@@ -25,6 +25,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -34,8 +35,11 @@ sys.path.insert(0, str(ROOT))
 from kb.update import APP_VERSION   # noqa: E402
 
 APP_NAME = "CyreneKeyboard"
-# 每次打到干净目录，避免 PyInstaller 去删旧产物（删几百个文件既慢又容易被安全软件拦）
-OUT = ROOT / "build" / "pyi-dist"
+# 每次打到**新的**目录：PyInstaller 的 COLLECT 会先删旧产物，
+# 一次几百个文件既慢又容易被安全软件/沙箱的"批量删除"规则拦下。
+# 代价是 build/ 下会留几份旧产物（已在 .gitignore 里，可随时手删）。
+_OUT_STAMP = time.strftime("%m%d-%H%M%S")
+OUT = ROOT / "build" / f"pyi-{_OUT_STAMP}"
 DIST = ROOT / "dist"
 
 # 排除用不到的 Qt 模块，能把体积压下来一大截。
