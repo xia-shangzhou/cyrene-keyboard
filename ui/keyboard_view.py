@@ -239,8 +239,20 @@ class KeyboardView(QWidget):
             self.timer.stop()
 
     # ---- 内部
+    def _needs_animation(self) -> bool:
+        """只有"会动的灯效"才需要 30fps 重绘。
+
+        关闭(0) / 常亮(1) 是静态的，重绘纯浪费——笔记本上用这两种模式的人不少。
+        """
+        return self.state.mode not in (0, 1) or self.sled.mode not in (0, 1)
+
     def _tick(self) -> None:
         if not self._animate:
+            return
+        # 窗口缩到托盘 / 最小化时完全不重绘（timer 空转一次几乎不占 CPU）
+        if not self.isVisible() or self.window().isMinimized():
+            return
+        if not self._needs_animation():
             return
         self._t += 0.033
         self.update()
@@ -279,6 +291,27 @@ class KeyboardView(QWidget):
         font = QFont(self.font())
         font.setPointSizeF(font_pt)
         font.setBold(False)
+
+        # 性能：下面这几样每帧只建一次，别放进 108 次的循环里
+        #   ① 键帽描边笔（粗细/颜色对所有键都一样）
+        #   ② 顶部高光渐变 —— 用 ObjectBoundingMode 让同一份渐变套到任意 rect 上，
+        #      否则 108 个键就要建 108 个 QLinearGradient（这是最贵的一步）
+        #   ③ 字号缓存：QFont 拷贝 + setPointSizeF 也不便宜，按字号复用
+        cap_pen = QPen(CAP_EDGE, max(0.6, s * 0.010))
+        hi = QLinearGradient(0.0, 0.0, 0.0, 1.0)
+        hi.setCoordinateMode(QLinearGradient.ObjectBoundingMode)
+        hi.setColorAt(0.0, QColor(255, 255, 255, 120))
+        hi.setColorAt(0.42, QColor(255, 255, 255, 0))
+        hi.setColorAt(1.0, QColor(122, 92, 108, 24))
+        font_cache: dict[float, QFont] = {}
+
+        def _font_at(pt: float) -> QFont:
+            f = font_cache.get(pt)
+            if f is None:
+                f = QFont(font)
+                f.setPointSizeF(pt)
+                font_cache[pt] = f
+            return f
 
         for k in L.KEYS:
             x = ox + k.x * s + L.GAP * s / 2
@@ -319,26 +352,23 @@ class KeyboardView(QWidget):
                 _clamp8(bcol.green() * (1 - tint) + col.green() * tint),
                 _clamp8(bcol.blue() * (1 - tint) + col.blue() * tint),
             )
-            p.setPen(QPen(CAP_EDGE, max(0.6, s * 0.010)))
+            p.setPen(cap_pen)
             p.setBrush(body)
             p.drawRoundedRect(rect, rad, rad)
 
-            # ③ 键帽顶部曲面高光
-            hi = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-            hi.setColorAt(0.0, QColor(255, 255, 255, 120))
-            hi.setColorAt(0.42, QColor(255, 255, 255, 0))
-            hi.setColorAt(1.0, QColor(122, 92, 108, 24))
+            # ③ 键帽顶部曲面高光（复用同一份 ObjectBoundingMode 渐变）
             p.setPen(Qt.NoPen)
             p.setBrush(hi)
             p.drawRoundedRect(rect, rad, rad)
 
             # ④ 字符：接近白色并带灯效色调，保证可读
             if w > s * 0.40 and h > s * 0.40:
-                f2 = QFont(font)
                 if len(k.name) > 4 and w < s * 1.9:
-                    f2.setPointSizeF(font.pointSizeF() * 0.72)
+                    f2 = _font_at(font_pt * 0.72)
                 elif len(k.name) > 2 and w < s * 1.1:
-                    f2.setPointSizeF(font.pointSizeF() * 0.80)
+                    f2 = _font_at(font_pt * 0.80)
+                else:
+                    f2 = font
                 p.setFont(f2)
                 p.setPen(TEXT_DARK)
                 p.drawText(rect, Qt.AlignCenter, k.name)
