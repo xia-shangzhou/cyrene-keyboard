@@ -475,6 +475,9 @@ class MockBackend(Backend):
 
     def get_sled(self) -> LedState:
         time.sleep(0.01)
+        # 主灯那边有 note_read()，侧灯漏了 —— 模拟模式下"读取次数"统计会少一半，
+        # 拿统计数字判断问题时会看错。
+        self.policy.note_read()
         return LedState(**self.sled.__dict__)
 
     def get_battery(self) -> BatteryInfo:

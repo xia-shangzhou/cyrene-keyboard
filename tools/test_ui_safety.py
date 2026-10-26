@@ -252,6 +252,70 @@ def test_last_led_updated_after_write() -> None:
     check("托盘沿用新亮度而不是旧值", bool(seen) and seen[-1] == 1, f"写入亮度={seen}")
 
 
+MSGS: list[str] = []
+
+
+def _record_msgs(on: bool) -> None:
+    """把提示框正文录下来（offscreen 下没有托盘，_notify 会走提示框那条路）。"""
+    if on:
+        MSGS.clear()
+        QMessageBox.warning = staticmethod(
+            lambda *a, **k: MSGS.append(str(a[2] if len(a) > 2 else a)) or None)
+    else:
+        QMessageBox.warning = staticmethod(lambda *a, **k: None)
+
+
+def test_quick_readonly_hint() -> None:
+    print("\n9. 只读模式下托盘切换：一条都不写，且提示指向只读")
+    fake = FakeHid(reply=None)
+    win, hb = new_window(fake)
+    win.tray = None                    # 没托盘 → _notify 走提示框，好录制
+    hb.readonly = True
+    hb.policy.strict_readonly = True
+    win._last_led = LedState(mode=1)
+    before = len(fake.frames)
+    _record_msgs(True)
+    win._quick(4)
+    _record_msgs(False)
+    check("零写入", len(fake.frames) == before, f"写帧={len(fake.frames) - before}")
+    check("提示指向只读模式", any("只读" in m for m in MSGS), str(MSGS[:1]))
+    # 老文案是"写入被限流或失败，请稍后再试一次"——只读状态下等多久都没用
+    check("不再误导成「稍后再试」", not any("稍后再试一次" in m for m in MSGS))
+
+
+def test_write_blocked_when_channel_dead() -> None:
+    print("\n10. 配置通道不可用时，写灯效要拦住并说明原因")
+    fake = FakeHid(reply=None)
+    win, hb = new_window(fake)
+    win.tray = None
+    hb.config_ok = False               # 2.4G / 拔线后的状态
+    before = len(fake.frames)
+    _record_msgs(True)
+    win._apply_main(LedState(mode=3))
+    _record_msgs(False)
+    check("没有向设备发帧", len(fake.frames) == before, f"写帧={len(fake.frames) - before}")
+    check("提示说明不转发配置", any("不转发" in m for m in MSGS), str(MSGS[:1]))
+
+
+def test_do_exhausted_notifies() -> None:
+    print("\n11. 重试 3 次仍写不进去：必须给出可见提示，不能只 print")
+    fake = FakeHid(reply=None)
+    win, hb = new_window(fake)
+    win.tray = None
+    calls: list[int] = []
+
+    def fn(_st):
+        calls.append(1)
+        return False                   # 模拟一直被限流
+
+    _record_msgs(True)
+    win._do(fn, LedState(mode=2), lambda s: None, which="led")
+    pump(APP, 1.6)                     # 让两次 400ms 重试有机会触发
+    _record_msgs(False)
+    check("确实重试了 3 次", len(calls) == 3, f"次数={len(calls)}")
+    check("失败有可见提示", any("没有写进去" in m for m in MSGS), str(MSGS[:1]))
+
+
 def main() -> int:
     global APP
     print("=" * 70)
@@ -269,7 +333,10 @@ def main() -> int:
                test_lock_restores_before_readonly,
                test_stale_retry_does_not_override,
                test_failed_restore_keeps_original,
-               test_last_led_updated_after_write):
+               test_last_led_updated_after_write,
+               test_quick_readonly_hint,
+               test_write_blocked_when_channel_dead,
+               test_do_exhausted_notifies):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

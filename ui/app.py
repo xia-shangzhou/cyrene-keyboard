@@ -118,19 +118,20 @@ def _install_qt_translator(app: QApplication) -> None:
     app._qt_translators = keep              # noqa: SLF001
 
 
-_MSG_ASCII_RUN = re.compile(r"[A-Za-z0-9_.:/+\-]+|.")
+_MSG_PHRASE = re.compile(r"[^。，、；：！？]*[。，、；：！？]?")
 
 
-def fit_msg(text: str, limit: float = 24.0) -> str:
+def fit_msg(text: str, limit: float = 23.0) -> str:
     """把弹窗正文按显示宽度重新折行。
 
-    QMessageBox 的宽度被 Qt 卡在 400px 左右（label 可用约 310px），而中文整行
+    QMessageBox 的宽度被 Qt 卡在 400px 左右（label 可用约 296px），而中文整行
     没有空格，Qt 不会自动折行 —— 超宽的行会被右边框直接裁掉。
     实测："· 万一灯效显示不对，按键盘 Fn+Insert 切一次模式即可恢复" 需要 408px，
     只有 311px 可用，末尾的"复"就没了。
 
-    这里按"中文 1 格、英文数字 0.5 格"估算（24 格 ≈ 295px，留一点余量），
-    英文单词整体不拆；`· ` 开头的列表项，续行加两个空格对齐。
+    做法：先按标点切成短语，再贪心塞进一行（23 格 ≈ 283px，留 1 格给行尾标点）。
+    这样断点落在「，」「。」后面，而不是把「模式」拆成「模 / 式」。
+    单个短语本身超宽时才退回按字符切；`· ` 开头的列表项，续行缩进对齐。
     """
     def width(s: str) -> float:
         return sum(0.5 if ord(c) < 128 else 1.0 for c in s)
@@ -143,17 +144,34 @@ def fit_msg(text: str, limit: float = 24.0) -> str:
         indent = line[: len(line) - len(line.lstrip())]
         body = line.strip()
         hang = indent + "  " if body.startswith("·") else indent
+
+        # 标点跟着前面的字一起成段，断行就不会把标点甩到下一行开头
+        phrases = [p for p in _MSG_PHRASE.findall(body) if p]
+
+        lines: list[str] = []
         cur = ""
-        for tok in _MSG_ASCII_RUN.findall(body):
-            if tok.isspace():
-                if cur:
-                    cur += tok
+        for ph in phrases:
+            if cur and width(cur) + width(ph) > limit:
+                lines.append(cur)
+                cur = ""
+            if width(ph) <= limit:
+                cur += ph
                 continue
-            if cur and width(cur) + width(tok) > limit:
-                out.append(indent + cur.rstrip())
-                cur, indent = "", hang
-            cur += tok
-        out.append(indent + cur.rstrip())
+            # 单个短语就超宽：只能按字符切开
+            buf = ""
+            for ch in ph:
+                if buf and width(buf) + width(ch) > limit:
+                    lines.append(buf)
+                    buf = ""
+                buf += ch
+            cur = buf
+        if cur:
+            lines.append(cur)
+
+        first = True
+        for ln in lines:
+            out.append((indent if first else hang) + ln)
+            first = False
     return "\n".join(out)
 
 
@@ -1841,6 +1859,8 @@ class MainWindow(QMainWindow):
         # 不加这个会出现 A → B → A：用户先改 A（被限流、排了重试）、再改 B（成功），
         # A 的旧重试随后落地把 B 覆盖回去。
         self._gen: dict[str, int] = {"led": 0, "sled": 0}
+        self._last_notify = 0.0
+        self._last_notify_text = ""
 
         root = QWidget()
         root.setObjectName("root")
@@ -1997,7 +2017,51 @@ class MainWindow(QMainWindow):
         if self.tray:
             self.tray.setToolTip(f"{APP_NAME} · {APP_NAME_CN}")
 
+    def _notify(self, text: str, *, warn: bool = True, cooldown: float = 0.0) -> None:
+        """把「写不进去」明确告诉用户，而不是只 print 到看不见的控制台。
+
+        托盘气泡优先（窗口常常已经缩到托盘了），没有托盘就弹提示框。
+        `cooldown` 用来避免拖滑块时同一句话刷屏。
+        """
+        now = time.monotonic()
+        if (cooldown and self._last_notify_text == text
+                and now - self._last_notify < cooldown):
+            return
+        self._last_notify, self._last_notify_text = now, text
+        icon = QSystemTrayIcon.Warning if warn else QSystemTrayIcon.Information
+        tray = getattr(self, "tray", None)
+        if tray:
+            tray.showMessage(APP_NAME, text, icon, 4500)
+        else:
+            _msgbox("warning" if warn else "information", self, APP_NAME, text)
+
+    def _channel_ready(self) -> bool:
+        """写之前先确认这条连接真的转发配置。
+
+        `config_ok` 为 False 时（2.4G、拔线、蓝牙断开后读失败累积），写下去
+        要么石沉大海、要么抛异常，而界面会把预览画成"已切换"—— 这就成了
+        「软件说成功了、键盘毫无反应」。所以先挡一下，并给出恢复办法。
+        """
+        if getattr(self.backend, "config_ok", True):
+            return True
+        self._notify(
+            "当前连接不转发灯效配置，这次没有写入。\n"
+            "插上 Type-C 线或切回蓝牙后，点右上角按钮重新检测。",
+            cooldown=8.0,
+        )
+        return False
+
+    def _explain_write_failure(self) -> str:
+        """三次都没写出去时，给一句能照着做的说明。"""
+        if not getattr(self.backend, "config_ok", True):
+            return ("灯效没有写进去：当前连接不转发配置（2.4G 或已断开）。\n"
+                    "插线或切回蓝牙后，点右上角按钮重新检测。")
+        return ("灯效没有写进去（写入被限流）。\n"
+                "稍等一下再试；一直不行就说明这条连接不转发配置。")
+
     def _apply_main(self, st: LedState) -> None:
+        if not self._channel_ready():
+            return
         # 用户在灯光页主动改灯效，说明不想看律动了 —— 让音乐收手，别继续抢控制权。
         # restore=False：用户的目标状态已经是眼前这个，不需要再恢复旧值。
         if self.page_music.running and st.mode not in P.AUDIO_MODES:
@@ -2009,6 +2073,8 @@ class MainWindow(QMainWindow):
         self._do(self.backend.set_led, st, self.kbview.load, which="led")
 
     def _apply_side(self, st: LedState) -> None:
+        if not self._channel_ready():
+            return
         self._do(self.backend.set_sled, st, self.kbview.load_sled, which="sled")
 
     def _bump_gen(self, which: str) -> int:
@@ -2048,6 +2114,8 @@ class MainWindow(QMainWindow):
             ok = fn(st)
         except Exception as e:  # noqa: BLE001
             print("写入失败:", e)
+            # 以前只 print：窗口一缩到托盘，用户根本不知道灯没改成
+            self._notify(f"写入失败：{e}\n灯效可能没有生效。", cooldown=6.0)
             self._refresh()
             return
         if ok is False:
@@ -2059,6 +2127,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 print("写入被限流，重试 %d 次仍未发出：%r" % (attempt, st))
+                self._notify(self._explain_write_failure(), cooldown=6.0)
         else:
             self._note_sent(which, st)
         self._refresh()
@@ -2111,6 +2180,14 @@ class MainWindow(QMainWindow):
             print("快捷切换：读状态失败", e)
             st = self._last_led
 
+        # 先判能不能写 —— 只读/通道失效时"稍后再试"永远不会好，
+        # 以前这里统一报"写入被限流或失败，请稍后再试一次"，等于指错方向。
+        if getattr(self.backend, "readonly", True):
+            self._notify("当前是只读模式，先在主窗口解锁再切换灯效。", cooldown=4.0)
+            return
+        if not self._channel_ready():
+            return
+
         if st is None:
             if self.tray:
                 self.tray.showMessage(
@@ -2143,10 +2220,8 @@ class MainWindow(QMainWindow):
             self.page_led.load(target)
             self.kbview.load(target)
             self._refresh()
-        elif self.tray:
-            self.tray.showMessage(
-                APP_NAME, "灯效切换未生效（写入被限流或失败），请稍后再试一次。",
-                QSystemTrayIcon.Warning, 3000)
+        else:
+            self._notify(self._explain_write_failure(), cooldown=4.0)
 
     def closeEvent(self, ev) -> None:
         if self.tray:
@@ -2173,16 +2248,7 @@ class MainWindow(QMainWindow):
             pass
 
 
-def main() -> int:
-    app = QApplication(sys.argv)
-    apply_style(app)
-    w = MainWindow()
-    # 有托盘 → 关窗缩到托盘；没有托盘则关窗即退（否则剩个看不见的进程）
-    app.setQuitOnLastWindowClosed(w.tray is None)
-    app.aboutToQuit.connect(w.shutdown)
-    w.show()
-    return app.exec()
+# 注意：这里**不要**再放 main()。程序入口是仓库根目录的 main.py（它带单实例互斥体），
+# 以前这里留过一份重复的 main()，谁用 `python -m ui.app` 启动就会绕过互斥体，
+# 两个进程同时抢键盘的配置通道 —— 那正是 2026-10-26 修掉的问题。
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
