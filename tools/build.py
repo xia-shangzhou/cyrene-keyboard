@@ -162,7 +162,11 @@ def package() -> Path | None:
 
     # 随附第三方许可证副本（LGPL-3.0 的硬性要求，见 THIRD_PARTY_LICENSES.md）。
     # 放进 _internal/ 里，用户不会误点，但确实在分发包内。
+    # build/licenses 是生成物（build/ 被 gitignore），干净环境里不存在 → 就地生成。
     lic_src = ROOT / "build" / "licenses"
+    if not lic_src.exists():
+        subprocess.run([sys.executable, str(ROOT / "tools" / "collect_licenses.py")],
+                       cwd=str(ROOT), capture_output=True, text=True, errors="replace")
     if lic_src.exists():
         shutil.copytree(lic_src, app_dir / "_internal" / "_licenses", dirs_exist_ok=True)
         n = sum(1 for _ in (app_dir / "_internal" / "_licenses").rglob("*") if _.is_file())

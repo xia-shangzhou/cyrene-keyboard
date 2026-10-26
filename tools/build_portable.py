@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -211,15 +212,32 @@ def copy_licenses() -> None:
 
     放到 site-packages/_licenses/：用户不会误点（也不破坏根目录三文件），
     但文件确实在分发包里，满足「随附许可证副本」。
+
+    来源 `build/licenses/` 是**生成物**（`build/` 在 .gitignore 里），
+    干净环境里必然不存在 —— 所以这里就地生成，不靠"记得先手动跑一次"。
+    （2026-10-26 CI 首次实跑就是因为这个报「校验产物完整性」失败。）
     """
+    if collect_licenses() != 0:
+        print("  [警告] 许可证生成失败，分发包会缺 LGPL 副本")
+        return
     src = ROOT / "build" / "licenses"
     if not src.exists():
-        print("  [警告] 没找到 build/licenses，先跑 python tools/collect_licenses.py")
+        print(f"  [警告] {src} 仍然不存在")
         return
     dst = SP_DST / "_licenses"
     shutil.copytree(src, dst, dirs_exist_ok=True)
     n = sum(1 for f in dst.rglob("*") if f.is_file())
     print(f"  许可证 {n} 个文件 → site-packages/_licenses/")
+
+
+def collect_licenses() -> int:
+    """调用 tools/collect_licenses.py 生成 build/licenses/。"""
+    script = ROOT / "tools" / "collect_licenses.py"
+    r = subprocess.run([sys.executable, str(script)], cwd=str(ROOT),
+                       capture_output=True, text=True, errors="replace")
+    if r.returncode != 0:
+        print((r.stderr or r.stdout or "")[-400:])
+    return r.returncode
 
 
 def write_launchers() -> None:
