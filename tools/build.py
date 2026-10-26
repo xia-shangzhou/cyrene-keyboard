@@ -93,7 +93,7 @@ Windows 11 的「智能应用控制」一旦处于强制模式，没签名的 ex
 没有信誉积累，必然会被拦。
 
 唯一的解决办法：改用同一个发布页上的 **CyreneKeyboard-Portable-v{ver}.zip**，
-功能完全一样，解压后双击「双击启动.vbs」即可，几乎不会被安全软件拦。
+功能完全一样，解压后双击「启动.bat」即可，几乎不会被安全软件拦。
 下载页：https://github.com/xia-shangzhou/cyrene-keyboard/releases/latest
 
 【删掉就是卸载】

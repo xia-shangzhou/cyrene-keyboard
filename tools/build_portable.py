@@ -48,48 +48,28 @@ SITE_DEPS = [
 ]
 SITE_FILES = ["_cffi_backend.cp313-win_amd64.pyd", "hid.cp313-win_amd64.pyd"]
 
-VBS = """' 双击这个文件启动昔涟键盘控制台（不会弹出黑色命令行窗口）
-' 如果没反应，改用「如果打不开点我.bat」，那个窗口里能看到报错
-Option Explicit
-Dim sh, fso, base, py, mainpy, q, cmd
-Set sh = CreateObject("WScript.Shell")
-Set fso = CreateObject("Scripting.FileSystemObject")
-base = fso.GetParentFolderName(WScript.ScriptFullName)
-py = base & "\\python\\pythonw.exe"
-mainpy = base & "\\main.py"
-If Not fso.FileExists(py) Then
-    MsgBox "程序文件不完整，请重新解压整个压缩包。" & vbCrLf & vbCrLf & _
-           "缺少：" & py, 16, "昔涟键盘控制台"
-    WScript.Quit 1
-End If
-If Not fso.FileExists(mainpy) Then
-    MsgBox "程序文件不完整，请重新解压整个压缩包。" & vbCrLf & vbCrLf & _
-           "缺少：" & mainpy, 16, "昔涟键盘控制台"
-    WScript.Quit 1
-End If
-q = Chr(34)
-cmd = q & py & q & " " & q & mainpy & q
-sh.CurrentDirectory = base
-sh.Run cmd, 0, False
-"""
-
-BAT = r"""@echo off
+# 唯一启动器：双击后立刻退出，不留命令行窗口。
+# 关键在 `start "" pythonw.exe` —— pythonw 没有控制台，start 又不等待子进程，
+# 所以 bat 自身秒退、程序独立存活。这是 v0.3 验证过的形态。
+#
+# ⚠ 两个坑都在 2026-10-26 由主人实测反馈后回滚掉，别再犯：
+#   · 用 `python.exe` 前台跑 → 控制台跟着进程走，那个黑窗口会一直开着
+#   · 用 vbs + `sh.Run cmd, 0, False` → 那个 0 是「隐藏窗口」启动样式，
+#     Qt 主窗口会继承它，表现为"后台有进程，但双击怎么都打不开"
+LAUNCHER_BAT = r"""@echo off
 chcp 936 >nul
 cd /d "%~dp0"
-echo 正在启动昔涟键盘控制台（这个窗口会留在后台，关掉它等于退出程序）
-echo.
-if not exist "python\python.exe" goto broken
+
+if not exist "python\pythonw.exe" goto broken
 if not exist "main.py" goto broken
-"python\python.exe" "main.py"
-if errorlevel 1 (
-    echo.
-    echo [程序异常退出] 把上面的报错内容发出来就能定位问题。
-    pause
-)
+
+start "" "python\pythonw.exe" "main.py"
 exit /b 0
 
 :broken
+echo.
 echo [错误] 程序文件不完整，请重新解压整个压缩包。
+echo.
 pause
 exit /b 1
 """
@@ -152,12 +132,14 @@ def copy_deps() -> None:
 
 
 def write_launchers() -> None:
-    write_text_gbk(PORTABLE / "双击启动.vbs", VBS)
-    write_text_gbk(PORTABLE / "如果打不开点我.bat", BAT)
-    old = PORTABLE / "运行.bat"
-    if old.exists():
-        old.unlink()
-    print("  启动器 双击启动.vbs / 如果打不开点我.bat")
+    write_text_gbk(PORTABLE / "启动.bat", LAUNCHER_BAT)
+    # 清掉历史版本留下的启动器，避免用户看到两个都像"启动"的东西
+    for stale in ("双击启动.vbs", "如果打不开点我.bat", "运行.bat"):
+        old = PORTABLE / stale
+        if old.exists():
+            old.unlink()
+            print(f"  清理旧启动器 {stale}")
+    print("  启动器 启动.bat（双击即启动，不留命令行窗口）")
 
 
 def make_zip() -> Path | None:
@@ -204,7 +186,7 @@ def main() -> int:
         out = make_zip()
         if out:
             print(f"  完成：{out}  ({out.stat().st_size / 1024 / 1024:.0f} MB)")
-    print("\n下一步：解压出来双击「双击启动.vbs」验一遍。")
+    print("\n下一步：解压出来双击「启动.bat」验一遍（应该闪一下就没有窗口，程序正常出现）。")
     return 0
 
 
