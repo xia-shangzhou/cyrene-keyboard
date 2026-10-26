@@ -1,0 +1,12 @@
+# Cyrene Keyboard · 构建依赖（在 requirements.txt 之上多一个打包工具）
+#
+#   python -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements-build.txt
+#
+# 只装运行依赖的话用 requirements.txt；这个文件给本地打包和 CI 用。
+
+-r requirements.txt
+
+# PyInstaller：生成 exe 版（--onedir）
+# 6.22.3 是实测通过构建 v0.4.1 / v0.4.2 的版本。升级前先跑一遍 tools/ 下的自检。
+pyinstaller==6.22.3

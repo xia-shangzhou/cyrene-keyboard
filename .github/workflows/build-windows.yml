@@ -1,0 +1,112 @@
+name: build-windows
+
+# 只构建并上传 Artifact，**不自动发布 Release**。
+# 正式发布仍然手动做：确认产物无问题后，用 .workbuddy/publish_v042.py 或网页发。
+
+on:
+  workflow_dispatch:            # 手动触发（Actions 页面点 Run workflow）
+  push:
+    tags: ["v*"]                # 打 tag 时自动跑，例如 v0.4.2
+
+# 最小权限：只需要读代码，不需要写任何东西（不发 Release、不改仓库）
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          # 与便携版内置的运行时保持一致，避免「打包用 3.13.x、运行用 3.13.y」
+          python-version: "3.13.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: 安装构建依赖
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: 静态检查（只编译不执行）
+        shell: pwsh
+        run: |
+          python -m compileall -q kb ui tools main.py
+          if ($LASTEXITCODE -ne 0) { throw "语法检查失败" }
+
+      - name: 运行单元测试
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen    # CI 没有桌面，Qt 走离屏渲染
+        run: |
+          # 这三套全部基于 Mock 后端，不碰真键盘
+          python tools/test_safety.py
+          if ($LASTEXITCODE -ne 0) { throw "test_safety 失败" }
+          python tools/smoke_test.py
+          if ($LASTEXITCODE -ne 0) { throw "smoke_test 失败" }
+          python tools/test_music_page.py
+          if ($LASTEXITCODE -ne 0) { throw "test_music_page 失败" }
+          # test_audioviz.py 依赖真实音频设备（WASAPI 回环），CI 上没有，跳过
+
+      - name: 准备便携版的内置 Python
+        shell: pwsh
+        run: |
+          $url = "https://www.python.org/ftp/python/3.13.12/python-3.13.12-embed-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile embed.zip
+          New-Item -ItemType Directory -Force -Path build/portable/python | Out-Null
+          Expand-Archive -Path embed.zip -DestinationPath build/portable/python -Force
+
+          # 嵌入式发行版默认把 site-packages 关掉，必须补回这两行，否则依赖全部 import 不到
+          $pth = "build/portable/python/python313._pth"
+          Add-Content -Path $pth -Value "Lib\site-packages" -Encoding ascii
+          Add-Content -Path $pth -Value "" -Encoding ascii
+          Add-Content -Path $pth -Value "import site" -Encoding ascii
+          Write-Host "--- python313._pth ---"
+          Get-Content $pth
+
+          # 把运行依赖装进便携版目录（PySide6 不在 build_portable.py 的复制清单里，只能这样装）
+          python -m pip install --target build/portable/python/Lib/site-packages -r requirements.txt
+
+      - name: 构建 exe 版
+        shell: pwsh
+        run: |
+          python tools/build.py --zip
+          if ($LASTEXITCODE -ne 0) { throw "exe 构建失败" }
+
+      - name: 构建便携版
+        shell: pwsh
+        run: |
+          python tools/build_portable.py
+          if ($LASTEXITCODE -ne 0) { throw "便携版构建失败" }
+
+      - name: 校验产物完整性
+        shell: pwsh
+        run: |
+          python tools/verify_packages.py
+          if ($LASTEXITCODE -ne 0) { throw "产物校验失败" }
+
+      - name: 生成 SHA-256
+        shell: pwsh
+        run: |
+          python tools/make_checksums.py
+          if ($LASTEXITCODE -ne 0) { throw "校验和生成失败" }
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: CyreneKeyboard-windows-${{ github.run_number }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
