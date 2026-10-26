@@ -78,7 +78,7 @@
 
 | 包 | 体积 | 怎么启动 | 说明 |
 |---|---|---|---|
-| `CyreneKeyboard-Portable-v*.zip` | ~105 MB | 解压 → 双击 `启动.bat` | **推荐先试这个**：谁都能跑，几乎不会被安全软件拦 |
+| `CyreneKeyboard-Portable-v*.zip` | ~105 MB | 解压 → 双击 `启动.bat`（`使用说明.txt` 就在旁边） | **推荐先试这个**：谁都能跑，几乎不会被安全软件拦 |
 | `CyreneKeyboard-v*-win64.zip` | ~60 MB | 解压 → 进 `CyreneKeyboard` 文件夹，双击 `CyreneKeyboard.exe` | exe 版，体积小一半；**开了智能应用控制的机器一定会被拦** |
 
 ### 为什么推荐便携版（先看这段，能少踩坑）
