@@ -835,7 +835,9 @@ class MusicPage(QWidget):
                                  settings=VizSettings(gain=self.s_gain.value() / 100.0,
                                                       decay_db_per_s=float(self.s_fall.value())))
             if not eng.start():
-                self.stop(restore=False)
+                # restore=True：音频没起来但灯已经在音乐模式 22，必须还原用户的灯效。
+                # 以前 restore=False → 键盘停在 22，且 original 被清空，永久丢失原灯效。
+                self.stop()
                 QMessageBox.critical(self, "采集失败", eng.error)
                 return
         self.engine = eng
@@ -1038,6 +1040,11 @@ class MusicPage(QWidget):
 
         try:
             b.policy.forget("led")
+            # 抢控制权之前，先把「还在路上的普通灯效重试」作废 ——
+            # 否则它 400ms 后落地，会把刚写进去的音乐模式 22 覆盖掉。
+            win = self.window()
+            if hasattr(win, "_bump_gen"):
+                win._bump_gen("led")
             if not self._set_led_retry(self._music_state()):
                 # 切不进音乐模式，推帧全是白推（固件没有渲染器接手）
                 QMessageBox.warning(
@@ -1104,7 +1111,15 @@ class MusicPage(QWidget):
                 restored = self._set_led_retry(self.original)
             except Exception:  # noqa: BLE001
                 restored = False
-        self.original = None
+            # ★ 只有真的恢复成功才丢掉原值。
+            # 以前是无条件清空，一旦恢复失败（拔线、通道切走），原灯效就永久丢了：
+            # 键盘停在音乐模式 22，下次启动又把 22 当成"原灯效"记下来，
+            # 从此正常停止也只能"恢复"成音乐模式。
+            if restored:
+                self.original = None
+        elif not restore:
+            # 用户的目标状态就是眼前这个，原值确实没用了
+            self.original = None
         self.src_lbl.setText("采集源")
         # 停止后把预览刷回真实灯效：否则大键盘图还停在音乐模式那张兜底渐变上，
         # 看着像"灯还亮着"，其实键盘已经恢复成涟漪了
@@ -1123,6 +1138,23 @@ class MusicPage(QWidget):
         self.stat_lbl.setText("—")
         self._refresh_btn()
 
+    def restore_pending(self) -> bool:
+        """补一次「上次没恢复成功」的原灯效。
+
+        stop() 恢复失败时会把 original 留着（而不是丢掉），退出前在这里再试一次；
+        还失败就只能这样了 —— 但至少没有把原值删掉，用户可以自己在灯光页重选。
+        """
+        if self.original is None or self.backend is None:
+            return True
+        try:
+            self.backend.policy.forget("led")
+            ok = self._set_led_retry(self.original)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            self.original = None
+        return ok
+
     # ---- 推送
     def _tick(self) -> None:
         eng, b = self.engine, self.backend
@@ -1140,7 +1172,11 @@ class MusicPage(QWidget):
         try:
             sent = b.set_audio_viz(eng.snapshot())
         except Exception as e:  # noqa: BLE001
-            self.stop(restore=False)
+            # restore=True：先试着把灯效还原。发送失败往往意味着灯也写不进去，
+            # 那就恢复不成 —— 但 stop() 会把 original 留着，退出前还会再试一次。
+            # 以前这里写 restore=False，结果是键盘永远停在音乐模式 22，
+            # 而且原灯效被清空，连"下次再试"的机会都没有。
+            self.stop()
             self.state_lbl.setText(f"发送中断：{e}")
             self.state_lbl.setStyleSheet(f"color:{T.DANGER}; font-size:11.5px;")
             return
@@ -1736,6 +1772,10 @@ class MainWindow(QMainWindow):
         self.backend = B.open_backend()
         self._last_led: LedState | None = None
         self._last_sled: LedState | None = None
+        # 写灯效的"代次"。每次用户产生新意图就 +1，迟到的限流重试发现自己过期了就直接作废。
+        # 不加这个会出现 A → B → A：用户先改 A（被限流、排了重试）、再改 B（成功），
+        # A 的旧重试随后落地把 B 覆盖回去。
+        self._gen: dict[str, int] = {"led": 0, "sled": 0}
 
         root = QWidget()
         root.setObjectName("root")
@@ -1897,18 +1937,47 @@ class MainWindow(QMainWindow):
         # restore=False：用户的目标状态已经是眼前这个，不需要再恢复旧值。
         if self.page_music.running and st.mode not in P.AUDIO_MODES:
             self.page_music.stop(restore=False)
-        self._do(self.backend.set_led, st, self.kbview.load)
+        # 用户亲手设了新灯效 → 上次恢复失败留下的"原灯效"作废，
+        # 否则下次某处再调 stop(restore=True) 会把它盖回用户刚设的值
+        if not self.page_music.running:
+            self.page_music.original = None
+        self._do(self.backend.set_led, st, self.kbview.load, which="led")
 
     def _apply_side(self, st: LedState) -> None:
-        self._do(self.backend.set_sled, st, self.kbview.load_sled)
+        self._do(self.backend.set_sled, st, self.kbview.load_sled, which="sled")
 
-    def _do(self, fn, st: LedState, preview, attempt: int = 0) -> None:
+    def _bump_gen(self, which: str) -> int:
+        self._gen[which] = self._gen.get(which, 0) + 1
+        return self._gen[which]
+
+    def _note_sent(self, which: str, st: LedState) -> None:
+        """记下**真的写成功了**的状态（拷贝，别留同一个对象）。
+
+        托盘快捷切换在读不到当前状态时会回落到这个镜像；不更新的话，
+        用户在灯光页把亮度调到 1，托盘那边还拿着旧亮度 4，
+        一次"读不到"就把整组参数按旧值全量写回去，把刚调好的覆盖掉。
+        """
+        snap = LedState(**st.__dict__)
+        if which == "led":
+            self._last_led = snap
+        else:
+            self._last_sled = snap
+
+    def _do(self, fn, st: LedState, preview, *, which: str = "led",
+            gen: int | None = None, attempt: int = 0) -> None:
         """写一次灯效。**返回值必须看** —— False 表示被限流、这次没发出去。
 
         预览先更新（拖滑块要跟手），但没发出去就在 400ms 后重试；
         连续 3 次都不行才放弃并打印。不重试的话，
         界面显示"已切换"而键盘还停在旧状态，而且那个值因为限流会被反复丢弃。
+
+        `gen` 是这次写入所属的代次：落地前发现已经不是最新代次，就整条作废
+        （连预览都不刷）—— 否则旧重试会覆盖用户后来的选择。
         """
+        if gen is None:
+            gen = self._bump_gen(which)
+        if gen != self._gen[which]:
+            return
         preview(st)
         try:
             ok = fn(st)
@@ -1918,9 +1987,15 @@ class MainWindow(QMainWindow):
             return
         if ok is False:
             if attempt < 2:
-                QTimer.singleShot(400, lambda: self._do(fn, st, preview, attempt + 1))
+                QTimer.singleShot(
+                    400,
+                    lambda: self._do(fn, st, preview, which=which, gen=gen,
+                                     attempt=attempt + 1),
+                )
             else:
                 print("写入被限流，重试 %d 次仍未发出：%r" % (attempt, st))
+        else:
+            self._note_sent(which, st)
         self._refresh()
 
     # ---- 托盘
@@ -1984,6 +2059,8 @@ class MainWindow(QMainWindow):
 
         target = LedState(**st.__dict__)     # 复制一份，别原地改缓存
         target.mode = mid
+        # 托盘也是"用户的新意图"：作废任何在途的灯光页重试，免得它稍后把这次覆盖掉
+        self._bump_gen("led")
 
         ok = False
         for _ in range(3):
@@ -2020,6 +2097,9 @@ class MainWindow(QMainWindow):
         try:
             if self.page_music.running:
                 self.page_music.stop(restore=True)
+            else:
+                # 上次恢复失败、原灯效还留着的话，退出前再试一次
+                self.page_music.restore_pending()
         except Exception:  # noqa: BLE001
             pass
         try:

@@ -67,6 +67,9 @@ jobs:
           # 边界回归：空数组帧、设备打开失败、增益除零、单实例互斥
           python tools/test_robustness.py
           if ($LASTEXITCODE -ne 0) { throw "test_robustness 失败" }
+          # 界面层：托盘兜底、只读上锁顺序、写入代次、恢复失败保留原灯效
+          python tools/test_ui_safety.py
+          if ($LASTEXITCODE -ne 0) { throw "test_ui_safety 失败" }
           # test_audioviz.py 依赖真实音频设备（WASAPI 回环），CI 上没有，跳过
 
       - name: 准备便携版的内置 Python

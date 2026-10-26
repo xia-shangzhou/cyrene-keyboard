@@ -1,9 +1,11 @@
-"""界面层回归测试：托盘快捷切换 + 只读切换顺序（offscreen，不碰硬件）。
+"""界面层回归测试：托盘快捷切换 + 只读切换顺序 + 写入代次（offscreen，不碰硬件）。
 
-对应 2026-10-25 审查意见里的 P1-3 与 P2-2：
+对应 2026-10-25 审查意见里的 P1-3 与 P2-2，以及 2026-10-26 第二轮外部审查
+（Kimi）指出的三条高优先级：
 
-    托盘快捷切换不能拿默认值覆盖用户灯效，且必须尊重写入结果
-    切回只读必须「先恢复灯效，再上锁」
+    1. 旧限流重试不能覆盖用户后来的选择（A → B → A）
+    2. 恢复失败不能丢掉原灯效（否则键盘永久停在音乐模式 22）
+    3. 写入成功后要更新 _last_led 镜像（托盘兜底不能拿旧参数全量写回）
 
     python tools/test_ui_safety.py
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -24,11 +27,20 @@ from kb import protocol as P                              # noqa: E402
 from kb.backend import HidBackend, LedState               # noqa: E402
 
 PASS, FAIL = [], []
+APP = None      # main() 里赋值，pump() 要用
 
 
 def check(name: str, cond: bool, extra: str = "") -> None:
     (PASS if cond else FAIL).append(name)
     print(f"  [{'OK ' if cond else 'FAIL'}] {name}" + (f"  {extra}" if extra else ""))
+
+
+def pump(app, seconds: float) -> None:
+    """让 QTimer.singleShot 真的有机会触发（offscreen 下也要转事件循环）。"""
+    end = time.time() + seconds
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
 
 
 class FakeHid:
@@ -88,10 +100,14 @@ def test_quick_without_state() -> None:
     fake = FakeHid(reply=None)                 # 读不到
     win, hb = new_window(fake)
     win._last_led = None
+    before_mode = getattr(win.kbview.state, "mode", None)
     before = len(fake.frames)
     win._quick(1)
     check("零写入", len(fake.frames) == before, f"写帧={len(fake.frames) - before}")
-    check("界面没伪报成功", win.kbview.state.mode != 1 or True)   # 只要求不写
+    # 原来是 `xxxx or True`，恒真，等于没断言。改成"界面状态没被改动"。
+    check("界面没伪报成功",
+          getattr(win.kbview.state, "mode", None) == before_mode,
+          f"mode={getattr(win.kbview.state, 'mode', None)}")
 
 
 def test_quick_preserves_params() -> None:
@@ -117,10 +133,17 @@ def test_quick_retries_throttle() -> None:
     fake = FakeHid(reply=None)
     win, hb = new_window(fake)
     win._last_led = LedState(mode=1)
-    hb.policy.write_interval = 0.15            # 第一次必被限流，0.2s 重试就能过
+    hb.policy.write_interval = 0.15
+    # ★ 先用掉当前写入额度：否则第一次就写成功，"重试分支"根本没被走到
+    #   （原来的版本就是这样，测了个寂寞）
+    hb.set_led(LedState(mode=2))
+    base = len(fake.frames)
+    throttled0 = hb.policy.stats["skipped_throttle"]
 
     win._quick(4)
-    check("最终写入成功", len(fake.frames) >= 1, f"写帧={len(fake.frames)}")
+    check("第一次确实被限流", hb.policy.stats["skipped_throttle"] > throttled0,
+          f"throttle={hb.policy.stats['skipped_throttle'] - throttled0}")
+    check("补发后只多一帧", len(fake.frames) - base == 1, f"写帧={len(fake.frames) - base}")
     check("界面显示目标模式", win.kbview.state.mode == 4, f"mode={win.kbview.state.mode}")
 
 
@@ -160,12 +183,82 @@ def test_lock_restores_before_readonly() -> None:
     check("恢复的正是进入律动前的灯效", any(m == 3 for m, _ro in seen), f"写入记录={seen}")
 
 
+def test_stale_retry_does_not_override() -> None:
+    print("\n6. 旧限流重试不能覆盖用户后来的选择（A → B → A）")
+    fake = FakeHid(reply=None)
+    win, hb = new_window(fake)
+    hb.policy.write_interval = 0.2
+
+    writes: list[int] = []
+    orig = hb.set_led
+
+    def spy(st):
+        ok = orig(st)
+        if ok:
+            writes.append(st.mode)
+        return ok
+
+    hb.set_led = spy
+
+    win._apply_main(LedState(mode=3))          # A：立刻写成功
+    pump(APP, 0.02)
+    t0 = hb.policy.stats["skipped_throttle"]
+    win._apply_main(LedState(mode=5))          # B：被限流 → 排 400ms 重试
+    pump(APP, 0.36)
+    win._apply_main(LedState(mode=7))          # C：用户又改，写成功
+    check("B 确实被限流并排了重试", hb.policy.stats["skipped_throttle"] > t0,
+          f"throttle={hb.policy.stats['skipped_throttle'] - t0}")
+
+    pump(APP, 1.2)                             # 给 B 的重试充分时间落地
+    check("B 的旧重试没有写出去", 5 not in writes, f"实际写入序列={writes}")
+    check("最终停在 C", writes and writes[-1] == 7, f"实际写入序列={writes}")
+    check("预览也停在 C", win.kbview.state.mode == 7, f"mode={win.kbview.state.mode}")
+
+
+def test_failed_restore_keeps_original() -> None:
+    print("\n7. 恢复失败时不能丢掉原灯效（否则永久停在音乐模式）")
+    fake = FakeHid(reply=None)
+    win, hb = new_window(fake)
+    _fake_running(win, LedState(mode=3, brightness=2))
+
+    hb.set_led = lambda st: False              # 模拟"通道不可用，恢复失败"
+    win.page_music.stop(restore=True)
+    kept = win.page_music.original
+    check("原灯效仍然保留", kept is not None,
+          f"original={None if kept is None else kept.mode}")
+
+    writes: list[int] = []
+    hb.set_led = lambda st: (writes.append(st.mode), True)[1]   # 通道恢复
+    win.shutdown()                             # 退出前补一次
+    check("退出前补了一次恢复", writes == [3], f"写入={writes}")
+    check("恢复成功后原值才清空", win.page_music.original is None)
+
+
+def test_last_led_updated_after_write() -> None:
+    print("\n8. 写入成功后要更新 _last_led 镜像（托盘兜底不能用旧参数）")
+    fake = FakeHid(reply=None)
+    win, hb = new_window(fake)
+    win._last_led = LedState(mode=1, speed=2, brightness=4, rgb=(10, 20, 30))
+
+    win._apply_main(LedState(mode=4, speed=2, brightness=1, rgb=(10, 20, 30)))
+    check("镜像亮度已更新", win._last_led.brightness == 1,
+          f"brightness={win._last_led.brightness}")
+
+    seen: list[int] = []
+    orig = hb.set_led
+    hb.set_led = lambda st: (seen.append(st.brightness), orig(st))[1]
+    hb.policy.write_interval = 0
+    win._quick(7)                              # 读不到状态 → 走镜像
+    check("托盘沿用新亮度而不是旧值", bool(seen) and seen[-1] == 1, f"写入亮度={seen}")
+
+
 def main() -> int:
+    global APP
     print("=" * 70)
     print("界面层回归测试（offscreen，不碰硬件）")
     print("=" * 70)
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    APP = QApplication.instance() or QApplication(sys.argv)
     # 这些路径会弹窗，统一按"是"处理，避免测试被阻塞
     QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     QMessageBox.information = staticmethod(lambda *a, **k: None)
@@ -173,7 +266,10 @@ def main() -> int:
 
     for fn in (test_quick_without_state, test_quick_preserves_params,
                test_quick_retries_throttle, test_quick_stops_music,
-               test_lock_restores_before_readonly):
+               test_lock_restores_before_readonly,
+               test_stale_retry_does_not_override,
+               test_failed_restore_keeps_original,
+               test_last_led_updated_after_write):
         try:
             fn()
         except Exception as e:  # noqa: BLE001
