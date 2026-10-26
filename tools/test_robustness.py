@@ -139,14 +139,33 @@ def t_single_instance() -> None:
           M._focus_existing_window() is False)
 
 
+def t_version_parse() -> None:
+    print("\n⑤ 版本号解析（构建元数据不能参与比较）")
+    from kb.update import parse_version as parse
+
+    cases = [
+        ("0.4.2", (0, 4, 2)),
+        ("v0.4.2", (0, 4, 2)),
+        ("0.4.2+build5", (0, 4, 2)),       # 曾经解析成 (0,4,25) → 误报有新版本
+        ("0.4.2+20261026", (0, 4, 2)),
+        ("0.5", (0, 5)),
+    ]
+    for text, want in cases:
+        got = parse(text)
+        check(f"{text!r} → {want}", got == want, f"实际 {got}")
+    check("带构建元数据的版本不比纯版本新", not (parse("0.4.2+build5") > parse("0.4.2")),
+          f"{parse('0.4.2+build5')} vs {parse('0.4.2')}")
+
+
 def main() -> int:
     if "--list" in sys.argv[1:]:
-        print("① 蓝牙帧长度  ② 打开失败容错  ③ 增益除零  ④ 单实例互斥")
+        print("① 蓝牙帧长度  ② 打开失败容错  ③ 增益除零  ④ 单实例互斥  ⑤ 版本号解析")
         return 0
     t_ble_frame_lengths()
     t_open_any_failure()
     t_gain_zero()
     t_single_instance()
+    t_version_parse()
     print("\n" + "=" * 62)
     print(f"通过 {_pass} 项，失败 {_fail} 项")
     print("=" * 62)

@@ -46,8 +46,13 @@ class UpdateResult:
 
 
 def parse_version(text: str) -> tuple[int, ...]:
-    """把 'v0.4.1' / '0.4' 之类解析成可比较的元组。解析不出来的部分忽略。"""
-    s = (text or "").strip().lstrip("vV")
+    """把 'v0.4.1' / '0.4' 之类解析成可比较的元组。解析不出来的部分忽略。
+
+    ⚠ 必须先丢掉 `+build` 这种构建元数据（语义化版本里它不参与比较）：
+    否则 "0.4.2+build5" 会被拆成 ["0","4","2+build5"]，最后一段取数字变成 25，
+    得到 (0, 4, 25) —— 比 0.4.2 还"新"，检查更新就会误报有新版本。
+    """
+    s = (text or "").strip().lstrip("vV").split("+")[0]
     parts: list[int] = []
     for chunk in s.replace("-", ".").split("."):
         digits = "".join(ch for ch in chunk if ch.isdigit())

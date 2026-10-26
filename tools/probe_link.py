@@ -66,12 +66,14 @@ def main() -> int:
 
         if not resp:
             verdict = "❌ 无响应 —— 这条链路不开放配置口"
+        elif bytes(resp) == req:
+            # ★ 回显判定必须排在"通"前面：回显帧的 resp[1] 也是这个命令码、
+            #   也不是全零，先判"通"就会把"假通道"报成可用（真踩过）。
+            verdict = "⚠ 原样回显 —— 帧到了设备，但固件没实现（或通道不支持）"
         elif resp[1] == P.Cmd.GET_LEDPARAM and not all(b == 0 for b in resp):
             info = P.parse_ledparam(resp)
             verdict = (f"✅ 通！当前灯效 {info['mode_name']} / 速度 {info['speed_raw']} / "
                        f"亮度 {info['brightness']} / rgb {info['rgb']}")
-        elif bytes(resp) == req:
-            verdict = "⚠ 原样回显 —— 帧到了设备，但固件没实现（或通道不支持）"
         elif all(b == 0 for b in resp[:8]):
             verdict = "❌ 全零帧 —— 本地吞掉，没转发给键盘"
         else:
