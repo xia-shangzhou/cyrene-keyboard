@@ -2111,8 +2111,9 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     apply_style(app)
-    app.setQuitOnLastWindowClosed(False)
     w = MainWindow()
+    # 有托盘 → 关窗缩到托盘；没有托盘则关窗即退（否则剩个看不见的进程）
+    app.setQuitOnLastWindowClosed(w.tray is None)
     app.aboutToQuit.connect(w.shutdown)
     w.show()
     return app.exec()

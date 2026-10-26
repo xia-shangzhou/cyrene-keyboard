@@ -123,9 +123,11 @@ def main() -> int:
     app.setOrganizationName("CyreneKeyboard")
     app.setWindowIcon(make_app_icon())
     apply_style(app)
-    app.setQuitOnLastWindowClosed(False)
 
     win = MainWindow()
+    # 有托盘 → 关窗只是缩到托盘，进程留着；**没有托盘就必须关窗即退**，
+    # 否则窗口关了、托盘也没有，只剩一个看不见的进程占着键盘通道。
+    app.setQuitOnLastWindowClosed(win.tray is None)
     # 退出时收尾：停音频线程、把灯效从音乐模式还原回去。
     # 少了这一句，从托盘点「退出」会把键盘留在音乐模式。
     app.aboutToQuit.connect(win.shutdown)

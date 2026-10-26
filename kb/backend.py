@@ -126,7 +126,8 @@ class HidBackend(Backend):
         self.config_ok = True
         # 连续失败计数：**不能一次失败就永久禁用** —— 有线时偶发一次通信错误，
         # 也会让软件以为这条线不能配置，只能重启才能恢复，那太脆了。
-        self._config_fail = 0
+        self._config_fail = 0     # 协议级（回显/全零/命令码不对），阈值 3
+        self._config_exc = 0      # HID 层抛异常，瞬态居多，阈值 5
         # 只读模式下策略层同步收紧，写命令连策略都过不去
         self.policy.strict_readonly = readonly
 
@@ -207,13 +208,33 @@ class HidBackend(Backend):
         return True
 
     def _mark_read_fail(self) -> None:
-        """读失败记账。连续 3 次才判定这条线不能配置 —— 偶发错误不该一票否决。"""
+        """协议级读失败记账。连续 3 次才判定这条线不能配置。
+
+        这里记的是**确定性**失败（回显、全零、命令码不对）——通道真不转发才会这样，
+        所以 3 次足够。
+        """
         self._config_fail += 1
         if self._config_fail >= 3:
             self.config_ok = False
 
+    def _mark_read_exception(self, exc: Exception) -> None:
+        """HID 层抛异常时的记账，阈值放宽到 5 次。
+
+        为什么要单独一个计数：异常多半是瞬态（拔插、休眠唤醒、蓝牙瞬时断开），
+        如果和"回显/全零"共用 3 次阈值，一次拔插抖动就会把界面锁成
+        「配置不可用」，比原问题更烦人。而完全不记（改动前的状态）又会让
+        `config_ok` 永远停在 True —— 连续报错也不降级，用户只能一直看着
+        「读不到当前灯效」。
+        """
+        self._config_exc += 1
+        if self._config_exc >= 5:
+            self.config_ok = False
+            print(f"连续 {self._config_exc} 次读取异常，判定配置通道不可用："
+                  f"{type(exc).__name__}: {exc}")
+
     def _mark_read_ok(self) -> None:
         self._config_fail = 0
+        self._config_exc = 0
 
     def reconnect_config(self) -> bool:
         """重新探测配置通道。
@@ -234,6 +255,7 @@ class HidBackend(Backend):
                 pass
         self.config_ok = self.kb.config_alive()
         self._config_fail = 0
+        self._config_exc = 0
         if self.config_ok:
             for k in ("led", "sled"):
                 self.policy.forget(k)
@@ -249,6 +271,11 @@ class HidBackend(Backend):
             resp = self._query(P.Cmd.GET_LEDPARAM, bit8=True)
         except QueryThrottled:
             return None          # 本地频控跳过，不记账（见 QueryThrottled 注释）
+        except Exception as e:  # noqa: BLE001
+            # HID 层直接抛异常（设备被拔、句柄失效、驱动报错）：不记的话
+            # config_ok 永远是 True，连挂几十次也不会降级，界面只会一直"读不到"。
+            self._mark_read_exception(e)
+            return None
         if not resp or len(resp) < 9 or self._is_echo(req, resp):
             self._mark_read_fail()
             return None
@@ -284,6 +311,9 @@ class HidBackend(Backend):
             resp = self._query(P.Cmd.GET_SLEDPARAM, bit8=True)
         except QueryThrottled:
             return None          # 本地频控跳过，不记账
+        except Exception as e:  # noqa: BLE001
+            self._mark_read_exception(e)
+            return None
         if not resp or len(resp) < 9 or self._is_echo(req, resp):
             self._mark_read_fail()
             return None

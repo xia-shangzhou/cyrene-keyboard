@@ -26,7 +26,7 @@ from dataclasses import dataclass
 # 发布仓库（owner/repo 形式，不带域名）
 GITHUB_REPO = "xia-shangzhou/cyrene-keyboard"
 
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 APP_VERSION_LABEL = f"v{APP_VERSION}"
 
 API_LATEST = "https://api.github.com/repos/{repo}/releases/latest"

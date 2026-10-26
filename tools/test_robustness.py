@@ -157,15 +157,52 @@ def t_version_parse() -> None:
           f"{parse('0.4.2+build5')} vs {parse('0.4.2')}")
 
 
+def t_read_exception_counts() -> None:
+    print("\n⑥ HID 层抛异常要计入配置失败（阈值放宽到 5 次）")
+    import kb.backend as B
+
+    class Boom:
+        """读就抛异常的假设备（模拟拔线/句柄失效）。"""
+
+        readonly = False
+
+        def query(self, *a, **k):
+            raise OSError("device unplugged")
+
+        def send(self, _f):
+            pass
+
+        def config_alive(self, *a, **k):
+            return True
+
+        def close(self):
+            pass
+
+    hb = B.HidBackend(readonly=False)
+    hb.kb = Boom()
+    hb.config_ok = True
+    hb.policy.read_interval = 0        # 关掉 50ms 读频控，否则会被 QueryThrottled 跳过
+
+    for _ in range(4):
+        got = hb.get_led()
+        check("异常时返回 None 而不是抛出去", got is None, f"第 {hb._config_exc} 次")
+    check("4 次异常后仍算可用（瞬态不该一票否决）", hb.config_ok is True,
+          f"exc={hb._config_exc}")
+    hb.get_led()
+    check("第 5 次异常后判定不可用", hb.config_ok is False, f"exc={hb._config_exc}")
+
+
 def main() -> int:
     if "--list" in sys.argv[1:]:
-        print("① 蓝牙帧长度  ② 打开失败容错  ③ 增益除零  ④ 单实例互斥  ⑤ 版本号解析")
+        print("① 蓝牙帧长度  ② 打开失败容错  ③ 增益除零  ④ 单实例互斥  "
+              "⑤ 版本号解析  ⑥ HID 异常计数")
         return 0
     t_ble_frame_lengths()
     t_open_any_failure()
     t_gain_zero()
     t_single_instance()
     t_version_parse()
+    t_read_exception_counts()
     print("\n" + "=" * 62)
     print(f"通过 {_pass} 项，失败 {_fail} 项")
     print("=" * 62)

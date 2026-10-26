@@ -58,6 +58,17 @@ def main() -> int:
             need(f"v{APP_VERSION}" in guide, f"使用说明.txt 版本号 v{APP_VERSION}")
             need("?" not in guide, "使用说明.txt 无编码乱码")
 
+            # ★ 关键依赖必须在包里。缺一个就少一个功能，而且用户点下去才会发现：
+            #   缺 soundcard/numpy → 音乐律动起不来；缺 hid → 连不上键盘；
+            #   缺 PySide6 → 程序根本打不开。构建脚本缺包时只会打印一行警告，
+            #   这里必须让发布直接失败（2026-10-26 加）。
+            sp = f"{top}python/Lib/site-packages/"
+            for dep in ("PySide6", "shiboken6", "numpy", "soundcard"):
+                need(any(n.startswith(sp + dep + "/") for n in names), f"依赖 {dep} 在包内")
+            need(any(n.startswith(sp + "hid.") and n.endswith(".pyd") for n in names),
+                 "依赖 hid 在包内")
+            need(f"{top}python/python313.zip" in names, "内置标准库 python313.zip")
+
     print("\n[exe 版]")
     need(EXE_ZIP.exists(), f"{EXE_ZIP.name} 存在" + (f" ({mb(EXE_ZIP)})" if EXE_ZIP.exists() else ""))
     if EXE_ZIP.exists():
@@ -73,6 +84,13 @@ def main() -> int:
             lic = "CyreneKeyboard/_internal/_licenses/"
             for f in ("LICENSE", "LGPL-3.0.txt"):
                 need(lic + f in names, f"随附 {f}")
+
+            # 关键依赖同样要验：PyInstaller 漏 hiddenimport 时 zip 照样"成功"
+            internal = "CyreneKeyboard/_internal/"
+            for dep in ("PySide6", "shiboken6", "numpy", "soundcard"):
+                need(any(n.startswith(internal + dep + "/") for n in names), f"依赖 {dep} 在包内")
+            need(any(n.startswith(internal + "hid.") and n.endswith(".pyd") for n in names),
+                 "依赖 hid 在包内")
 
     print()
     if problems:
