@@ -287,7 +287,12 @@ class AudioVizEngine:
             step = max(-1.0, min(1.0, err * 0.12))
             self._gain_db = float(np.clip(self._gain_db + step, -6.0, 54.0))
 
-        db = db_raw + (20.0 * np.log10(self.cfg.gain) + self._gain_db)
+        # gain 护栏：界面上滑杆最小是 0.1，但配置可能被手改、也可能以后放开范围。
+        # np.log10(0) = -inf → frac = nan → 指数平滑把 nan 永久写进 _levels，
+        # 之后**声音恢复也再也不会动**（除零污染不可逆）。这里兜一个下限。
+        gain = max(1e-4, float(self.cfg.gain))
+        db = db_raw + (20.0 * np.log10(gain) + self._gain_db)
+
 
         # 峰值跟踪：跟得快、落得慢，但落不到 peak_floor 以下
         decay = self.cfg.decay_db_per_s * dt

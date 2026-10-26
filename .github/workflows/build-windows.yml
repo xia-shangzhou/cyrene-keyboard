@@ -55,6 +55,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "smoke_test 失败" }
           python tools/test_music_page.py
           if ($LASTEXITCODE -ne 0) { throw "test_music_page 失败" }
+          # 边界回归：空数组帧、设备打开失败、增益除零、单实例互斥
+          python tools/test_robustness.py
+          if ($LASTEXITCODE -ne 0) { throw "test_robustness 失败" }
           # test_audioviz.py 依赖真实音频设备（WASAPI 回环），CI 上没有，跳过
 
       - name: 准备便携版的内置 Python

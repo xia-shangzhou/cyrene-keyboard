@@ -1129,6 +1129,14 @@ class MusicPage(QWidget):
         if not eng or not b:
             self._timer.stop()
             return
+        # 采集线程可能已经死了（拔耳机、切默认输出设备、驱动崩），而定时器还在空转：
+        # 不查 eng.error 的话界面会一直显示"运行中"，键盘灯也卡在最后一帧。
+        if getattr(eng, "error", ""):
+            err = eng.error
+            self.stop()                      # restore=True：把灯效从音乐模式还原
+            self.state_lbl.setText(f"采集已中断：{err}")
+            self.state_lbl.setStyleSheet(f"color:{T.DANGER}; font-size:11.5px;")
+            return
         try:
             sent = b.set_audio_viz(eng.snapshot())
         except Exception as e:  # noqa: BLE001
@@ -1469,7 +1477,7 @@ class AboutPage(QWidget):
         note = QLabel(
             "只读模式下不会向键盘写入任何数据。\n"
             "解锁后只改灯效参数，不碰固件、改键、宏与配对。\n"
-            "万一灯效异常，按键盘 Fn+Tab 切一次模式即可恢复。"
+            "万一灯效异常，按键盘 Fn+Insert 切一次模式即可恢复。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#8C7480; font-size:11.5px;")
@@ -1829,7 +1837,7 @@ class MainWindow(QMainWindow):
             "解锁后可以向键盘写入灯效参数。\n\n"
             "· 只会修改灯效（模式/亮度/速度/方向/颜色）\n"
             "· 不会碰固件、改键、宏、配对\n"
-            "· 万一灯效显示不对，按键盘 Fn+Tab 切一次模式即可恢复\n\n"
+            "· 万一灯效显示不对，按键盘 Fn+Insert 切一次模式即可恢复\n\n"
             "确定解锁吗？",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )

@@ -425,6 +425,16 @@ class MockBackend(Backend):
     def connect(self) -> None:
         self._connected = True
 
+    @staticmethod
+    def _led_key(st: LedState) -> tuple:
+        """缓存键：与 HidBackend 的 `(mode, speed, brightness, opts, *rgb)` 同构。
+
+        HidBackend 把「方向 << 4 | 彩虹标志」打包成一个 opts 字节，这里跟着打包，
+        两个后端的去重语义才完全一致（否则同一个 LedState 会算出不同的键）。
+        """
+        opts = (st.direction << 4) | (0x08 if st.colorful else 0x07)
+        return (st.mode, st.speed, st.brightness, opts, *st.rgb)
+
     def disconnect(self) -> None:
         self._connected = False
 
@@ -446,7 +456,9 @@ class MockBackend(Backend):
 
     def set_led(self, st: LedState) -> bool:
         # 和 HidBackend 同样的顺序：先查（不改状态）→ 再限流 → 通过后才落值
-        vals = (st.mode, st.speed, st.brightness, st.direction, st.colorful, st.rgb)
+        # 缓存键必须与 HidBackend 完全同构（opts 打包、rgb 展开）：
+        # 两个后端用同一个 key 名 "led"，结构不一致会让跨后端的去重判断失真。
+        vals = self._led_key(st)
         if self.policy.values_unchanged("led", vals):
             self.policy.note_duplicate()
             return True
@@ -458,7 +470,7 @@ class MockBackend(Backend):
         return True
 
     def set_sled(self, st: LedState) -> bool:
-        vals = (st.mode, st.speed, st.brightness, st.direction, st.colorful, st.rgb)
+        vals = self._led_key(st)
         if self.policy.values_unchanged("sled", vals):
             self.policy.note_duplicate()
             return True

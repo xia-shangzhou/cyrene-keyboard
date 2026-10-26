@@ -208,9 +208,14 @@ def build_audio_viz_ble(bands: list[int] | bytes | tuple[int, ...],
         return v & 0x0F
 
     # 容错：传 8 个频段（UI 的 levels()）就按"相邻两段同值"展开成 16 段，
-    # 和音频引擎 snapshot() 的 16 段语义一致
+    # 和音频引擎 snapshot() 的 16 段语义一致。
+    # 其它长度（空列表、少给几个、多给几个）一律先截断再补 0 —— 下面的循环
+    # 直接索引 bands[2*j] / bands[2*j+1]，不做规范化会抛 IndexError 把推流线程打断。
     if len(bands) == AUDIO_BANDS // 2:
         bands = [v for v in bands for _ in range(2)]
+    elif len(bands) != AUDIO_BANDS:
+        head = list(bands)[:AUDIO_BANDS]
+        bands = head + [0] * (AUDIO_BANDS - len(head))
 
     frame = bytearray(FRAME_LEN)
     frame[1] = Cmd.SET_AUDIO_VIZ

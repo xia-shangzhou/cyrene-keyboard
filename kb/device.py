@@ -195,15 +195,22 @@ class Keyboard:
           2. **兜底自动发现**：VID/PID 不认识时，按 usage 签名找「像配置口」的接口，
              逐个试一条只读查询，通了就用 —— 这样别人机器上型号/批次不同也能用
         """
+        # 打开失败的设备不中断整条发现链：可能是拔插瞬态、被另一个实例占用、
+        # 或正从有线切到蓝牙。要接着试同型号的备选接口，也要能落到下面的自动发现。
+        last_err: Exception | None = None
         for vid, pid, _label, link in KNOWN_IDS:
             cands = [d for d in find_keyboard(vid, pid) if is_vendor_iface(d)]
-            if cands:
-                # 必须优先 usage=0x0002 的配置口：同设备还有个 usage=0x0001 的厂商接口，
-                # 拿它发命令只会 read error（2.4G 下尤其明显，两个接口都在 0xFFFF 页）
-                cands.sort(key=iface_rank)
-                d = cands[0]
-                return cls(d["path"], readonly=readonly, vid=vid, pid=pid,
-                           product=d.get("product_string") or "", link=link)
+            if not cands:
+                continue
+            # 必须优先 usage=0x0002 的配置口：同设备还有个 usage=0x0001 的厂商接口，
+            # 拿它发命令只会 read error（2.4G 下尤其明显，两个接口都在 0xFFFF 页）
+            cands.sort(key=iface_rank)
+            for d in cands:
+                try:
+                    return cls(d["path"], readonly=readonly, vid=vid, pid=pid,
+                               product=d.get("product_string") or "", link=link)
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
 
         if discover:
             known = {(v, p) for v, p, _l, _k in KNOWN_IDS}
@@ -224,6 +231,10 @@ class Keyboard:
                 if kb is not None:
                     kb.close()
 
+        if last_err is not None:
+            raise RuntimeError(
+                f"找到键盘接口但打不开（可能被别的程序占用，或正在切换连接方式）：{last_err}"
+            ) from last_err
         raise RuntimeError("没找到键盘的厂商接口")
 
     @classmethod

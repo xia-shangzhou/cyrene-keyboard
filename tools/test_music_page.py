@@ -128,6 +128,21 @@ def main() -> int:
     check("样式写入 direction", page._music_state().direction == 1,
           f"direction={page._music_state().direction}")
 
+    # 采集线程死掉（拔耳机/切默认设备/驱动崩）时，界面不能一直显示"运行中"
+    print("\n6. 采集中断感知")
+    page.set_readonly(False)
+    page.start()
+    pump(app, 0.3)
+    eng = page.engine
+    check("已启动，可注入错误", page.running and eng is not None)
+    if eng is not None:
+        eng.error = "设备已断开（模拟）"
+        page._tick()
+        check("检测到采集错误后自动停止", not page.running)
+        check("状态栏显示具体原因", "设备已断开" in page.state_lbl.text(),
+              page.state_lbl.text())
+        check("灯效已从音乐模式还原", b.led.mode == 4, f"mode={b.led.mode}")
+
     try:
         wav.unlink()
     except OSError:

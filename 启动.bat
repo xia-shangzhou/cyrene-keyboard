@@ -17,16 +17,16 @@ if defined PY goto havepy
 goto nopython
 
 :havepy
-"%PY%" -c "import hid,PySide6" >nul 2>nul
+"%PY%" -c "import hid,PySide6,soundcard,numpy" >nul 2>nul
 if errorlevel 1 goto deps
 start "" "%PY%" "%~dp0main.py"
 exit /b 0
 
 :deps
 echo.
-echo 缺少依赖，正在安装 hidapi 和 PySide6，第一次运行需要几分钟 ...
+echo 缺少依赖，正在安装 hidapi / PySide6 / soundcard / numpy，第一次运行需要几分钟 ...
 echo.
-"%PY%" -m pip install hidapi PySide6 --disable-pip-version-check
+"%PY%" -m pip install hidapi PySide6 soundcard numpy --disable-pip-version-check
 start "" "%PY%" "%~dp0main.py"
 exit /b 0
 
