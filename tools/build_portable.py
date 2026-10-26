@@ -109,8 +109,10 @@ GUIDE_TXT = """Cyrene Keyboard v{ver} · 使用说明
    红字报错复制出来发出来就能定位
 
 【会被杀毒软件拦吗】
-一般不会。这个包用的是官方 Python 解释器，里面没有 exe 文件，
-所以不会被 Windows 11 的「智能应用控制」拦下。
+通常不会。这个包里没有 exe 文件，程序由官方签名的 Python 解释器执行，
+所以一般不会触发 Windows 11「智能应用控制」对未签名程序的拦截。
+注意：解释器有签名不等于本程序有签名。不同电脑的安全设置不一样，
+不能保证每台都放行；如果被拦，请把提示截图发到 GitHub Issues。
 
 【连接方式】
 USB 有线：能调灯，音乐律动最跟手（50Hz）
@@ -204,6 +206,22 @@ def copy_deps() -> None:
             print(f"  依赖 {name}")
 
 
+def copy_licenses() -> None:
+    """随附第三方许可证副本（LGPL-3.0 的硬性义务）。
+
+    放到 site-packages/_licenses/：用户不会误点（也不破坏根目录三文件），
+    但文件确实在分发包里，满足「随附许可证副本」。
+    """
+    src = ROOT / "build" / "licenses"
+    if not src.exists():
+        print("  [警告] 没找到 build/licenses，先跑 python tools/collect_licenses.py")
+        return
+    dst = SP_DST / "_licenses"
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    n = sum(1 for f in dst.rglob("*") if f.is_file())
+    print(f"  许可证 {n} 个文件 → site-packages/_licenses/")
+
+
 def write_launchers() -> None:
     write_text_gbk(PORTABLE / "启动.bat", LAUNCHER_BAT)
     write_text_gbk(PORTABLE / "使用说明.txt", GUIDE_TXT.format(ver=APP_VERSION))
@@ -252,6 +270,7 @@ def main() -> int:
 
     print("\n① 复制代码");   copy_code(args.clean)
     print("\n② 复制依赖");   copy_deps()
+    print("\n②b 随附许可证"); copy_licenses()
     print("\n③ 写启动器");   write_launchers()
 
     total = sum(f.stat().st_size for f in PORTABLE.rglob("*") if f.is_file())

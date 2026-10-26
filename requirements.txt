@@ -1,0 +1,26 @@
+# Cyrene Keyboard · 运行/构建依赖
+#
+# 已验证环境：Windows 10/11 64 位 + CPython 3.13.12
+# 全部版本锁定，避免「昨天能跑今天不能跑」。升级前请先跑一遍 tools/ 下的自检脚本。
+#
+#   python -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements.txt
+#   .venv\Scripts\python main.py
+
+# --- GUI ---
+# PySide6 是 LGPL-3.0，分发包里必须随附许可证并允许用户替换 DLL，见 THIRD_PARTY_LICENSES.md
+PySide6-Essentials==6.12.0
+PySide6-Addons==6.12.0
+shiboken6==6.12.0
+
+# --- 音乐律动（FFT / 矩阵运算）---
+numpy==2.5.3
+
+# --- 系统音频回环采集（WASAPI）---
+soundcard==0.4.6
+cffi==2.1.1
+pycparser==3.0
+
+# --- 键盘 HID 通信 ---
+# 0.15.0 为 BSD-3-Clause 或 GPL-3.0 双许可，本项目按 BSD-3-Clause 使用
+hidapi==0.15.0

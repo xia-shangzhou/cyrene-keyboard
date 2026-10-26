@@ -93,7 +93,8 @@ Windows 11 的「智能应用控制」一旦处于强制模式，没签名的 ex
 没有信誉积累，必然会被拦。
 
 唯一的解决办法：改用同一个发布页上的 **CyreneKeyboard-Portable-v{ver}.zip**，
-功能完全一样，解压后双击「启动.bat」即可，几乎不会被安全软件拦。
+功能完全一样，解压后双击「启动.bat」即可。那个包里没有 exe 文件，
+通常不会触发这类策略，但不能保证每台电脑都放行。
 下载页：https://github.com/xia-shangzhou/cyrene-keyboard/releases/latest
 
 【删掉就是卸载】
@@ -158,6 +159,16 @@ def package() -> Path | None:
     # 说明直接放进 exe 所在文件夹：双击 exe 就能用，不需要先跑脚本建快捷方式。
     # （vbs 建快捷方式要 WScript.Shell，正是杀软重点拦的 LOLBin，发出去自己也验证不了）
     write_gbk(app_dir / "使用说明.txt", README_TXT.format(ver=APP_VERSION))
+
+    # 随附第三方许可证副本（LGPL-3.0 的硬性要求，见 THIRD_PARTY_LICENSES.md）。
+    # 放进 _internal/ 里，用户不会误点，但确实在分发包内。
+    lic_src = ROOT / "build" / "licenses"
+    if lic_src.exists():
+        shutil.copytree(lic_src, app_dir / "_internal" / "_licenses", dirs_exist_ok=True)
+        n = sum(1 for _ in (app_dir / "_internal" / "_licenses").rglob("*") if _.is_file())
+        print(f"  随附许可证 {n} 个文件 → _internal/_licenses/")
+    else:
+        print("  [警告] 没找到 build/licenses，先跑 python tools/collect_licenses.py")
 
     # zip 根目录就叫 CyreneKeyboard/，少一层 "xxx-win64/CyreneKeyboard" 的套娃
     total = 0
