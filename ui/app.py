@@ -7,6 +7,7 @@ Cyrene Keyboard（昔涟键盘控制台）—— 主界面。
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -99,8 +100,72 @@ def _light_palette():
     return pal
 
 
+def _install_qt_translator(app: QApplication) -> None:
+    """让 QMessageBox 的标准按钮显示中文（确定/取消），而不是 Yes/No。
+
+    Qt 的标准按钮文案来自它自带的翻译文件；不装 QTranslator 的话，
+    一个全中文界面里会突然冒出英文 Yes / No，看着像没做完。
+    """
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+
+    path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    keep = []
+    for name in ("qtbase_zh_CN", "qt_zh_CN"):
+        tr = QTranslator(app)
+        if tr.load(name, path):
+            app.installTranslator(tr)
+            keep.append(tr)                 # 不保住引用会被回收，翻译随即失效
+    app._qt_translators = keep              # noqa: SLF001
+
+
+_MSG_ASCII_RUN = re.compile(r"[A-Za-z0-9_.:/+\-]+|.")
+
+
+def fit_msg(text: str, limit: float = 24.0) -> str:
+    """把弹窗正文按显示宽度重新折行。
+
+    QMessageBox 的宽度被 Qt 卡在 400px 左右（label 可用约 310px），而中文整行
+    没有空格，Qt 不会自动折行 —— 超宽的行会被右边框直接裁掉。
+    实测："· 万一灯效显示不对，按键盘 Fn+Insert 切一次模式即可恢复" 需要 408px，
+    只有 311px 可用，末尾的"复"就没了。
+
+    这里按"中文 1 格、英文数字 0.5 格"估算（24 格 ≈ 295px，留一点余量），
+    英文单词整体不拆；`· ` 开头的列表项，续行加两个空格对齐。
+    """
+    def width(s: str) -> float:
+        return sum(0.5 if ord(c) < 128 else 1.0 for c in s)
+
+    out: list[str] = []
+    for line in str(text).split("\n"):
+        if not line.strip():
+            out.append("")
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        body = line.strip()
+        hang = indent + "  " if body.startswith("·") else indent
+        cur = ""
+        for tok in _MSG_ASCII_RUN.findall(body):
+            if tok.isspace():
+                if cur:
+                    cur += tok
+                continue
+            if cur and width(cur) + width(tok) > limit:
+                out.append(indent + cur.rstrip())
+                cur, indent = "", hang
+            cur += tok
+        out.append(indent + cur.rstrip())
+    return "\n".join(out)
+
+
+def _msgbox(kind: str, parent, title: str, text: str, *rest, **kw):
+    """统一入口：正文先折行，避免 QMessageBox 把长行裁掉。"""
+    fn = getattr(QMessageBox, kind)
+    return fn(parent, title, fit_msg(text), *rest, **kw)
+
+
 def apply_style(app: QApplication) -> str:
     fam = ensure_cjk_font()
+    _install_qt_translator(app)
     app.setPalette(_light_palette())
     app.setStyleSheet(T.build_qss(fam))
     return fam
@@ -828,7 +893,7 @@ class MusicPage(QWidget):
                              settings=VizSettings(gain=self.s_gain.value() / 100.0,
                                                   decay_db_per_s=float(self.s_fall.value())))
         if not eng.start():
-            QMessageBox.warning(self, "切换失败",
+            _msgbox("warning", self, "切换失败",
                                 f"抓不到该设备的音频：{eng.error}")
             # 退回默认输出；默认也起不来的话只能停下，别留个空引擎空转
             eng = AudioVizEngine(device_name=None,
@@ -838,7 +903,7 @@ class MusicPage(QWidget):
                 # restore=True：音频没起来但灯已经在音乐模式 22，必须还原用户的灯效。
                 # 以前 restore=False → 键盘停在 22，且 original 被清空，永久丢失原灯效。
                 self.stop()
-                QMessageBox.critical(self, "采集失败", eng.error)
+                _msgbox("critical", self, "采集失败", eng.error)
                 return
         self.engine = eng
         self.src_lbl.setText(f"采集源 · {eng.device_label}")
@@ -962,13 +1027,13 @@ class MusicPage(QWidget):
     def start(self) -> None:
         b = self.backend
         if b is None:
-            QMessageBox.warning(self, "无法启动", "还没有连接后端。")
+            _msgbox("warning", self, "无法启动", "还没有连接后端。")
             return
         # 幂等：重复点击不能把 original 覆盖成"音乐模式自己"，否则停止时恢复不回去
         if self.running:
             return
         if b.name == "hid" and not getattr(b, "config_ok", True):
-            QMessageBox.warning(
+            _msgbox("warning", 
                 self, "配置不可用",
                 "当前是 2.4G 无线，这条通道不转发配置命令，推帧到不了键盘。\n\n"
                 "插上 Type-C 线切到有线模式（长按 Fn+5 约 3 秒）再试。",
@@ -978,14 +1043,14 @@ class MusicPage(QWidget):
         self.frame_interval = 20               # 默认 50Hz（有线）
         self._ble_active = False
         if b.name == "hid" and getattr(b, "readonly", True):
-            QMessageBox.warning(
+            _msgbox("warning", 
                 self, "需要解锁写入",
                 "当前是只读模式，不会向键盘发送任何数据。\n\n"
                 "请先点右上角「只读模式」解锁，再回来启动律动。",
             )
             return
         if not AudioVizEngine.available():
-            QMessageBox.critical(
+            _msgbox("critical", 
                 self, "缺少组件",
                 "没有安装 soundcard 库，无法采集系统音频。\n\n"
                 "在项目环境里执行：pip install soundcard",
@@ -1014,7 +1079,7 @@ class MusicPage(QWidget):
             time.sleep(0.15)
             led = b.get_led()          # 偶发一次读失败（尤其蓝牙）重试一次
         if led is None:
-            QMessageBox.warning(
+            _msgbox("warning", 
                 self, "读不到当前灯效",
                 "读不到键盘当前的灯效，就没法保证停止时能还原，所以先不启动。\n\n"
                 "可以点顶部状态条上的「配置不可用」重试一次连接，再回来试。",
@@ -1030,7 +1095,7 @@ class MusicPage(QWidget):
             QApplication.restoreOverrideCursor()
 
         if not ok:
-            QMessageBox.critical(
+            _msgbox("critical", 
                 self, "采集失败",
                 f"抓不到系统音频：{self.engine.error}\n\n"
                 "常见原因：输出设备被独占、采样率不支持、声卡驱动加了音效层。",
@@ -1047,7 +1112,7 @@ class MusicPage(QWidget):
                 win._bump_gen("led")
             if not self._set_led_retry(self._music_state()):
                 # 切不进音乐模式，推帧全是白推（固件没有渲染器接手）
-                QMessageBox.warning(
+                _msgbox("warning", 
                     self, "切换音乐模式失败",
                     "连续几次都被写入限流挡住，键盘可能还停在原来的灯效。\n\n"
                     "等一秒再点一次「开始律动」即可。",
@@ -1056,7 +1121,7 @@ class MusicPage(QWidget):
                 self.engine = None
                 return
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "切换模式失败", str(e))
+            _msgbox("critical", self, "切换模式失败", str(e))
             self.engine.stop()
             self.engine = None
             return
@@ -1569,18 +1634,18 @@ class AboutPage(QWidget):
 
         if r.error:
             self.upd_lbl.setText("检查失败：" + r.error.splitlines()[0])
-            QMessageBox.information(self, "检查更新失败", r.error)
+            _msgbox("information", self, "检查更新失败", r.error)
             return
 
         self.upd_lbl.setText(f"远端最新：{r.latest}" + (f"（{r.note}）" if r.note else ""))
         if not r.has_new:
-            QMessageBox.information(
+            _msgbox("information", 
                 self, "已是最新",
                 f"当前 {U.APP_VERSION_LABEL}，远端也是 {r.latest}。\n不用更新。",
             )
             return
 
-        ok = QMessageBox.question(
+        ok = _msgbox("question", 
             self, "发现新版本",
             f"当前 {U.APP_VERSION_LABEL} → 最新 {r.latest}\n"
             f"{r.note}\n\n要打开 Releases 页面去看看吗？",
@@ -1843,7 +1908,7 @@ class MainWindow(QMainWindow):
         if not getattr(b, "config_ok", True):
             # 插上线之后不用重启软件：这个按钮顺便做一次重连探测
             if not b.reconnect_config():
-                QMessageBox.information(
+                _msgbox("information", 
                     self, "这条通道还是不转发配置",
                     "键盘是连上的，但当前的连接方式不转发配置命令：\n"
                     "读取只返回全零帧或接收器缓存的旧数据，写入也到不了键盘。\n\n"
@@ -1852,7 +1917,7 @@ class MainWindow(QMainWindow):
                     "日常打字、打游戏不受影响。",
                 )
                 return
-            QMessageBox.information(self, "配置已恢复",
+            _msgbox("information", self, "配置已恢复",
                                     "检测到配置通道可用了，现在可以调灯效。")
             self._reload()
         locking = not getattr(b, "readonly", True)
@@ -1872,7 +1937,7 @@ class MainWindow(QMainWindow):
             self._refresh()
             return
 
-        ok = QMessageBox.question(
+        ok = _msgbox("question", 
             self, "解锁写入",
             "解锁后可以向键盘写入灯效参数。\n\n"
             "· 只会修改灯效（模式/亮度/速度/方向/颜色）\n"
