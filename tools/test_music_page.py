@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import time
@@ -23,10 +24,51 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
+import numpy as np  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from kb.audioviz import AudioVizEngine  # noqa: E402
 from kb.backend import MockBackend  # noqa: E402
 from ui.app import MusicPage, apply_style  # noqa: E402
+
+# GitHub 的 Windows runner 没有声卡：不设这个变量时直接开引擎会失败，
+# 后面所有断言都会误报成"UI 坏了"。设了就用合成电平的替身，照样验 UI 链路。
+CI = os.environ.get("CYRENE_CI") == "1"
+
+
+class _CiEngine(AudioVizEngine):
+    """合成电平替身：接口与真引擎一致，但不碰 WASAPI。"""
+
+    @staticmethod
+    def list_outputs() -> list[str]:
+        return ["CI 模拟回环设备"]
+
+    def start(self) -> bool:
+        self.error = ""
+        self.device_label = "CI 模拟回环设备"
+        self._running = True
+        self._sim = 0.0
+        return True
+
+    def stop(self) -> None:
+        self._running = False
+
+    def snapshot(self) -> list[int]:
+        self._sim += 0.12
+        return [int(round(3 + 2.9 * math.sin(self._sim + i * 0.4)))
+                for i in range(self.SEGMENTS)]
+
+    def levels(self) -> list[float]:
+        self._sim += 0.02
+        lv = np.array([0.55 + 0.4 * math.sin(self._sim + i * 0.5)
+                       for i in range(self.COLUMNS)], dtype=np.float32)
+        with self._lock:
+            self._levels = lv
+        return [float(x) for x in lv]
+
+    def levels_db(self) -> list[float]:
+        return [-24.0] * self.COLUMNS
+
 
 fails: list[str] = []
 
@@ -54,6 +96,11 @@ def pump(app: QApplication, seconds: float) -> None:
 def main() -> int:
     app = QApplication([])
     apply_style(app)
+
+    if CI:
+        import ui.app as _uiapp
+        _uiapp.AudioVizEngine = _CiEngine      # 页面在 start() 里按模块全局取类
+        print("（CI 模式：用合成电平替身，不碰真实音频设备）")
 
     from test_audioviz import make_sweep  # 复用扫频生成
     import tempfile
@@ -95,10 +142,12 @@ def main() -> int:
     check("亮度取界面值", b.led.brightness == page.s_bright.value(), f"{b.led.brightness}")
 
     print("\n3. 推送（播放 2 秒扫频）")
-    import winsound
-    winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
+    if not CI:                       # runner 上既没有声卡也没必要真出声
+        import winsound
+        winsound.PlaySound(str(wav), winsound.SND_FILENAME | winsound.SND_ASYNC)
     pump(app, 2.0)
-    winsound.PlaySound(None, winsound.SND_PURGE)
+    if not CI:
+        winsound.PlaySound(None, winsound.SND_PURGE)
     n_frames = page._frames
     check("定时器在推帧", n_frames >= 40, f"{n_frames} 帧 / 2s")
     check("频段数据非全零", any(v > 0 for v in b.last_bands), str(b.last_bands))

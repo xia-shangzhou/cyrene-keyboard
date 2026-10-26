@@ -6,11 +6,20 @@ name: build-windows
 on:
   workflow_dispatch:            # 手动触发（Actions 页面点 Run workflow）
   push:
+    branches: ["main"]          # 每次推 main 都验一遍（不涉及发布，纯构建 + 测试）
     tags: ["v*"]                # 打 tag 时自动跑，例如 v0.4.2
 
 # 最小权限：只需要读代码，不需要写任何东西（不发 Release、不改仓库）
 permissions:
   contents: read
+
+env:
+  # ★ 必须设：GitHub 的 Windows runner 默认控制台是 cp1252，
+  # 测试脚本里打印中文会抛 UnicodeEncodeError 直接把 CI 干红（2026-10-26 实测踩过）。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  # 告诉测试「这台机器没有音频设备」，用合成电平替身跑通 UI 链路
+  CYRENE_CI: "1"
 
 jobs:
   build:
