@@ -86,9 +86,13 @@ README_TXT = """Cyrene Keyboard v{ver} · 使用说明
 这是正常的 —— 程序没有买代码签名证书。
 点「更多信息」→「仍要运行」即可，之后不会再提示。
 
-【如果 exe 根本跑不起来】
-exe 双击没反应、被杀软删掉、或者 Windows 11 提示「智能应用控制已阻止」：
-请改用同一个发布页上的 **CyreneKeyboard-Portable-v{ver}.zip**（Python 源码版），
+【如果 exe 跑不起来（很可能，先看这段）】
+Windows 11 的「智能应用控制」一旦处于强制模式，没签名的 exe 会被直接拒绝，
+提示「应用程序控制策略已阻止此文件」，而且没有「仍要运行」可以点。
+这不是误报、也不是文件损坏，是系统策略：每个新版本的 exe 都是全新文件、
+没有信誉积累，必然会被拦。
+
+唯一的解决办法：改用同一个发布页上的 **CyreneKeyboard-Portable-v{ver}.zip**，
 功能完全一样，解压后双击「双击启动.vbs」即可，几乎不会被安全软件拦。
 下载页：https://github.com/xia-shangzhou/cyrene-keyboard/releases/latest
 
