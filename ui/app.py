@@ -647,7 +647,7 @@ class MusicPage(QWidget):
     STYLES = [
         (0, "竖向柱 · 自下而上"),
         (1, "横向 · 从中间向两边"),
-        (2, "横向 · 从左向右"),
+        (2, "横向 · 从左向右（实测仅左侧亮）"),
     ]
 
     def __init__(self, parent=None):
@@ -1138,8 +1138,11 @@ class MusicPage(QWidget):
             return
         lv = eng.levels()
         self.bars.set_levels(lv)
-        # 把同一份电平喂给大键盘预览：固件只画 8 列且横向样式不亮，
-        # 界面这边三种样式都画，用户至少能在软件里看清律动长什么样。
+        # 把同一份电平喂给大键盘预览：固件只画 8 列。
+        # 2026-10-26 蓝牙实测（线格式修复后）：竖向柱、横向·从中间 都能正常出光；
+        # 横向·从左 只点亮左侧约 1/4~1/3，且换成反向阶梯图案后亮的位置不变
+        # （与频段值无关）—— 所以样式 2 在界面上仍标注实测限制。
+        # 界面这边三种样式都按各自形状画，用户至少能在软件里看清律动长什么样。
         kv = getattr(self.window(), "kbview", None)
         if kv is not None:
             kv.set_music(lv, self.style)
