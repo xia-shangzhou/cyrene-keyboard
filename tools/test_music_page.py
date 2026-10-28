@@ -192,6 +192,45 @@ def main() -> int:
               page.state_lbl.text())
         check("灯效已从音乐模式还原", b.led.mode == 4, f"mode={b.led.mode}")
 
+    # 2.4G 档位（2026-10-27 加）：必须和蓝牙一样给 25/50 两个选项、记住上次选择。
+    # 这里把 _ask_rate 换成取值函数 —— 真实弹窗是 box.exec()，offscreen 下会卡死。
+    print("\n7. 2.4G 档位选择")
+
+    class FakeDongle(MockBackend):
+        """冒充 2.4G 接收器通道：kb.dongle=True，别的都走 Mock。"""
+
+        name = "hid"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.readonly = False
+            self.kb = type("K", (), {"dongle": True, "ble": False})()
+
+    fd = FakeDongle()
+    fd.connect()
+    dp = MusicPage()
+    dp.backend = fd
+    dp.resize(900, 420)
+    picked: list[int | None] = [40]
+    dp._ask_rate = lambda *a, **k: picked[0]      # 不弹窗，直接给答案
+
+    dp.start()
+    check("2.4G 默认 25Hz", dp.frame_interval == 40, f"interval={dp.frame_interval}")
+    check("状态栏标明通道与档位", "2.4G 25Hz" in dp.state_lbl.text(),
+          dp.state_lbl.text())
+    dp.stop()
+
+    picked[0] = 20
+    dp.start()
+    check("2.4G 可选 50Hz", dp.frame_interval == 20, f"interval={dp.frame_interval}")
+    check("档位被记住（下次默认停在 50Hz）", dp._dongle_interval == 20,
+          f"_dongle_interval={dp._dongle_interval}")
+    dp.stop()
+
+    picked[0] = None
+    dp.start()
+    check("取消档位则不启动", not dp.running)
+
     try:
         wav.unlink()
     except OSError:

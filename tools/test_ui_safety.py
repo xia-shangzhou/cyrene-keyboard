@@ -288,13 +288,13 @@ def test_write_blocked_when_channel_dead() -> None:
     fake = FakeHid(reply=None)
     win, hb = new_window(fake)
     win.tray = None
-    hb.config_ok = False               # 2.4G / 拔线后的状态
+    hb.config_ok = False               # 拔线 / 断连 / 读失败累积后的状态
     before = len(fake.frames)
     _record_msgs(True)
     win._apply_main(LedState(mode=3))
     _record_msgs(False)
     check("没有向设备发帧", len(fake.frames) == before, f"写帧={len(fake.frames) - before}")
-    check("提示说明不转发配置", any("不转发" in m for m in MSGS), str(MSGS[:1]))
+    check("提示说明读不到键盘状态", any("读不到" in m for m in MSGS), str(MSGS[:1]))
 
 
 def test_do_exhausted_notifies() -> None:

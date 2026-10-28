@@ -386,7 +386,7 @@ class TopBar(QWidget):
 
     def update_status(self, backend: Backend) -> None:
         real = backend.name == "hid"
-        # 连上了但通道不转发配置（2.4G 实测）：这一格必须明确告警，
+        # 连上了但配置通道没就绪（读不到键盘状态）：这一格必须明确告警，
         # 否则界面会拿默认值冒充真实灯效，用户以为自己在看键盘的实际状态
         alive = getattr(backend, "config_ok", True)
         if not real:
@@ -406,8 +406,8 @@ class TopBar(QWidget):
             self.lock_btn.setText("配置不可用")
             self.lock_btn.setEnabled(True)
             self.lock_btn.setToolTip(
-                "键盘已连上，但这条通道（2.4G 无线）不转发配置命令。\n"
-                "点这里会重新探测一次 —— 插好 USB 线后点它就能恢复，不用重启软件。"
+                "键盘已连上，但现在读不到它的灯效状态（可能被别的程序占用，或连接刚好断了）。\n"
+                "点这里会重新探测一次 —— 不用重启软件。"
             )
             self.lock_btn.setStyleSheet(
                 "background:#FFF7E8; border:1px solid #E8A23D;"
@@ -747,11 +747,13 @@ class MusicPage(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(20)          # 50Hz（有线默认）
         self._timer.timeout.connect(self._tick)
-        # 实际推帧间隔：有线 20ms(50Hz)，蓝牙可选 40ms(25Hz) / 20ms(50Hz)。start() 时决定
+        # 实际推帧间隔：有线 20ms(50Hz)，蓝牙/2.4G 可选 40ms(25Hz) / 20ms(50Hz)。start() 时决定
         self.frame_interval = 20
-        # 蓝牙档位的记忆值：第一次默认 25Hz(40ms)，用户选了 50Hz 就记住
+        # 各通道的档位记忆：第一次默认 25Hz(40ms)，用户选了 50Hz 就记住
         self._ble_interval = 40
-        self._ble_active = False
+        self._dongle_interval = 40
+        # 状态栏后缀（"蓝牙 50Hz" / "2.4G 25Hz"），有线留空
+        self._rate_note = ""
 
         self._stat_timer = QTimer(self)
         self._stat_timer.setInterval(250)
@@ -1013,27 +1015,19 @@ class MusicPage(QWidget):
         else:
             self.start()
 
-    def _ask_ble_rate(self) -> int | None:
-        """蓝牙下问档位。返回帧间隔（ms），None = 用户取消。
+    def _ask_rate(self, title: str, text: str, info: str, remembered: int) -> int | None:
+        """通用档位弹窗。返回帧间隔（ms），None = 用户取消。
 
-        单独抽出来是为了能测：`exec()` 会阻塞，塞在 `start()` 里就没法自动验证分支。
+        `remembered` 是上次选的间隔，用来自动高亮默认按钮。
         """
         box = QMessageBox(self)
-        box.setWindowTitle("蓝牙下跑律动")
-        box.setText(
-            "蓝牙带宽比有线窄：一次往返 16ms，实测帧率上限约 64Hz。\n"
-            "选小一点的档位，可以把链路留给按键上报。"
-        )
-        box.setInformativeText(
-            "· 25Hz：省电、几乎不影响打字，灯略不跟手（默认）\n"
-            "· 50Hz：和有线的节奏一致、更顺滑，占链路多一些\n"
-            "　实测 50Hz 时打字仍可正常办公，只是极轻微迟钝\n\n"
-            "想两全就插 Type-C 切有线（一轮约 1ms，完全不占带宽）。"
-        )
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setInformativeText(info)
         btn25 = box.addButton("25Hz（默认）", QMessageBox.AcceptRole)
         btn50 = box.addButton("50Hz", QMessageBox.AcceptRole)
         box.addButton("取消", QMessageBox.RejectRole)
-        box.setDefaultButton(btn25 if self._ble_interval == 40 else btn50)
+        box.setDefaultButton(btn25 if remembered == 40 else btn50)
         box.exec()
         hit = box.clickedButton()
         if hit is btn25:
@@ -1041,6 +1035,38 @@ class MusicPage(QWidget):
         if hit is btn50:
             return 20
         return None
+
+    def _ask_ble_rate(self) -> int | None:
+        """蓝牙下问档位。返回帧间隔（ms），None = 用户取消。
+
+        单独抽出来是为了能测：`exec()` 会阻塞，塞在 `start()` 里就没法自动验证分支。
+        """
+        return self._ask_rate(
+            "蓝牙下跑律动",
+            "蓝牙带宽比有线窄：一次往返 16ms，实测帧率上限约 64Hz。\n"
+            "选小一点的档位，可以把链路留给按键上报。",
+            "· 25Hz：省电、几乎不影响打字，灯略不跟手（默认）\n"
+            "· 50Hz：和有线的节奏一致、更顺滑，占链路多一些\n"
+            "　实测 50Hz 时打字仍可正常办公，只是极轻微迟钝\n\n"
+            "想两全就插 Type-C 切有线（一轮约 1ms，完全不占带宽）。",
+            self._ble_interval,
+        )
+
+    def _ask_dongle_rate(self) -> int | None:
+        """2.4G 下问档位。返回帧间隔（ms），None = 用户取消。
+
+        2.4G 和蓝牙的限制不同：不是带宽不够（单帧只占 3ms，理论上限 334Hz），
+        而是接收器要求周期性「重新唤醒」，那 120ms 里推不了帧。
+        """
+        return self._ask_rate(
+            "2.4G 下跑律动",
+            "2.4G 单帧只占 3ms，带宽完全够；真正的开销是接收器需要周期性重新唤醒，\n"
+            "那一下约 0.12 秒推不了帧。档位越低，这个空档越不显眼。",
+            "· 25Hz：更省电，唤醒空档里只丢 3 帧，几乎看不出（默认）\n"
+            "· 50Hz：和有线的节奏一致、波浪更细，空档里丢 6 帧\n\n"
+            "两个档位都实测过连续推流不掉帧。想完全不被唤醒打断就插 Type-C 切有线。",
+            self._dongle_interval,
+        )
 
     def start(self) -> None:
         b = self.backend
@@ -1053,13 +1079,15 @@ class MusicPage(QWidget):
         if b.name == "hid" and not getattr(b, "config_ok", True):
             _msgbox("warning", 
                 self, "配置不可用",
-                "当前是 2.4G 无线，这条通道不转发配置命令，推帧到不了键盘。\n\n"
-                "插上 Type-C 线切到有线模式（长按 Fn+5 约 3 秒）再试。",
+                "现在读不到键盘状态，推帧发不出去。\n\n"
+                "先点右上角的「配置不可用」按钮重新探测一次；\n"
+                "还不行就检查一下键盘是不是断连了（或换根线试试）。",
             )
             return
         is_ble = b.name == "hid" and bool(getattr(getattr(b, "kb", None), "ble", False))
+        is_dongle = b.name == "hid" and bool(getattr(getattr(b, "kb", None), "dongle", False))
         self.frame_interval = 20               # 默认 50Hz（有线）
-        self._ble_active = False
+        self._rate_note = ""
         if b.name == "hid" and getattr(b, "readonly", True):
             _msgbox("warning", 
                 self, "需要解锁写入",
@@ -1083,7 +1111,18 @@ class MusicPage(QWidget):
                 return
             self._ble_interval = interval      # 记住，下次弹窗默认停在它上面
             self.frame_interval = interval
-            self._ble_active = True
+            self._rate_note = f"蓝牙 {round(1000 / interval)}Hz"
+        elif is_dongle:
+            # 2.4G 走接收器的开闸窗口推流：窗口 ≥1.6s，帧间不重开闸。
+            # 单帧发送只要 3ms（理论上限 334Hz），带宽不是瓶颈；
+            # 真正的开销是每 DONGLE_STREAM_REARM 秒要重新唤醒一次（约 120ms 推不了帧）。
+            # 所以和蓝牙一样给两个档位，默认 25Hz（唤醒空档里丢的帧少一半）。
+            interval = self._ask_dongle_rate()
+            if interval is None:
+                return
+            self._dongle_interval = interval
+            self.frame_interval = interval
+            self._rate_note = f"2.4G {round(1000 / interval)}Hz"
 
         cfg = VizSettings(
             gain=self.s_gain.value() / 100.0,
@@ -1153,9 +1192,7 @@ class MusicPage(QWidget):
         self._stat_timer.start()
         hz = round(1000 / self.frame_interval)
         self.state_lbl.setText(
-            f"运行中 · 主灯已切到音乐律动条（蓝牙 {hz}Hz）"
-            if self._ble_active else
-            "运行中 · 主灯已切到音乐律动条")
+            f"运行中 · 主灯已切到音乐律动条（{self._rate_note or f'{hz}Hz'}）")
         self.state_lbl.setStyleSheet(f"color:{T.OK}; font-size:11.5px;")
         self._refresh_btn()
 
@@ -1430,8 +1467,9 @@ class ConnectionPage(QWidget):
          "灯效全部可读可写。\n调逐键 RGB 建议用这个。"),
         ("2.4G 无线",
          "把接收器插进电脑 USB 口，开关拨到 2.4G，长按 Fn+4 约 3 秒配对。",
-         "实测：配置命令不转发（接收器固件只应答自己的电量/状态查询）。\n"
-         "所以灯效在这个模式下改不了，请插 USB 线。"),
+         "实测可读可写（2026-10-27）。\n"
+         "接收器要先发 0xF7 唤醒才转发配置，单次改灯约慢 150ms，程序已自动处理。\n"
+         "律动可跑：默认 25Hz，也可选 50Hz。"),
         ("蓝牙",
          "开关拨到蓝牙，长按 Fn+1 / Fn+2 / Fn+3 约 3 秒，分别配对三台设备。",
          "实测可读可写（2026-10-25）。\n"
@@ -1900,7 +1938,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(w)
         ml.addWidget(self.stack, 5)
 
-        # 只读 OR 这条通道压根不能配置（2.4G）→ 都当只读，控件灰掉，
+        # 只读 OR 配置通道没就绪 → 都当只读，控件灰掉，
         # 免得用户在不能写的通道上白点半天
         ro = (bool(getattr(self.backend, "readonly", False))
               or not getattr(self.backend, "config_ok", True))
@@ -1929,11 +1967,11 @@ class MainWindow(QMainWindow):
             # 插上线之后不用重启软件：这个按钮顺便做一次重连探测
             if not b.reconnect_config():
                 _msgbox("information", 
-                    self, "这条通道还是不转发配置",
-                    "键盘是连上的，但当前的连接方式不转发配置命令：\n"
-                    "读取只返回全零帧或接收器缓存的旧数据，写入也到不了键盘。\n\n"
-                    "插上 Type-C 数据线、切到有线模式（长按 Fn+5 约 3 秒）后，"
-                    "再点一次这个按钮就能恢复，不用重启软件。\n\n"
+                    self, "配置通道仍未就绪",
+                    "键盘是连上的，但现在读不到它的灯效状态：\n"
+                    "读取只返回状态帧或全零帧，写入也到不了键盘。\n\n"
+                    "常见原因：另一个驱动/软件正占着设备、键盘刚断连、或 USB 口供电不稳。\n"
+                    "关掉官方驱动后点一次这个按钮就能恢复，不用重启软件。\n\n"
                     "日常打字、打游戏不受影响。",
                 )
                 return
@@ -2036,17 +2074,17 @@ class MainWindow(QMainWindow):
             _msgbox("warning" if warn else "information", self, APP_NAME, text)
 
     def _channel_ready(self) -> bool:
-        """写之前先确认这条连接真的转发配置。
+        """写之前先确认配置通道真的可用。
 
-        `config_ok` 为 False 时（2.4G、拔线、蓝牙断开后读失败累积），写下去
+        `config_ok` 为 False 时（拔线、断连、读失败累积），写下去
         要么石沉大海、要么抛异常，而界面会把预览画成"已切换"—— 这就成了
         「软件说成功了、键盘毫无反应」。所以先挡一下，并给出恢复办法。
         """
         if getattr(self.backend, "config_ok", True):
             return True
         self._notify(
-            "当前连接不转发灯效配置，这次没有写入。\n"
-            "插上 Type-C 线或切回蓝牙后，点右上角按钮重新检测。",
+            "现在读不到键盘状态，这次没有写入。\n"
+            "检查一下连接，再点右上角按钮重新检测。",
             cooldown=8.0,
         )
         return False
@@ -2054,10 +2092,10 @@ class MainWindow(QMainWindow):
     def _explain_write_failure(self) -> str:
         """三次都没写出去时，给一句能照着做的说明。"""
         if not getattr(self.backend, "config_ok", True):
-            return ("灯效没有写进去：当前连接不转发配置（2.4G 或已断开）。\n"
-                    "插线或切回蓝牙后，点右上角按钮重新检测。")
+            return ("灯效没有写进去：现在读不到键盘状态（可能已断连）。\n"
+                    "检查连接后点右上角按钮重新检测。")
         return ("灯效没有写进去（写入被限流）。\n"
-                "稍等一下再试；一直不行就说明这条连接不转发配置。")
+                "稍等一下再试。")
 
     def _apply_main(self, st: LedState) -> None:
         if not self._channel_ready():

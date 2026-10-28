@@ -5,6 +5,9 @@
   · 蓝牙（BLE）           ：Output Report（Report ID 6）+ 0x55 前导，响应走 Input Report 通知
 `Keyboard.send()` / `.query()` 内部按 `self.ble` 分支，`query()` 的返回值统一归一化成
 USB 形状，所以 backend.py 一行都不用改。
+
+2.4G 接收器（`3151:5052`）另有一条额外的规矩：**它不会自动转发配置命令**，
+必须先发 `0xF7` 把它「开闸」，等约 120ms 才开始转发。见 `_dongle_arm()`。
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import time
 import hid
 
 from . import protocol as P
-from .safety import FORBIDDEN, READ_ONLY, UnsafeCommandError
+from .safety import FORBIDDEN, READ_ONLY, STREAMING, UnsafeCommandError
 
 # 已知的昔涟键盘标识： (vid, pid, 说明, 连接类型)
 KNOWN_IDS = [
@@ -59,6 +62,51 @@ BLE_MARKER_EVT = 0x66
 
 # ⚠ hidapi 在 Windows 上对 BLE 设备传 timeout_ms=0 会**永久阻塞**，必须 ≥1
 BLE_MIN_TIMEOUT_MS = 1
+
+# ---------------------------------------------------------------- 2.4G 接收器
+#
+# 2026-10-27 实测推翻旧结论「接收器不转发配置」。真实机制是：
+#
+#   接收器是个中间人，**不会主动转发**主机的 Feature Report。要先「开闸」：
+#     ① 发 0xF7 (GET_DONGLE_STATUS)
+#     ② 等 ~120ms，接收器才进入转发状态
+#     ③ 再发目标命令，键盘的回复才会回来
+#
+#   读也有两个坑：
+#     · 发完**立刻**读，读到的是接收器自己的状态帧
+#       `00 00 64 00 00 01 01 01…`（0x64 = 电量 100%）—— 不是"空"，是"太早"
+#     · **Feature 缓冲区永远只给状态帧**，键盘的真实回复只进缓存槽，
+#       必须发 `0xFC` 把它「冲」进缓冲区才读得到（实测：直接读 0/10 命中，
+#       等 10ms 再发 0xFC 则 8/8 命中、单次 17ms）
+#     · **判据：真回复的第 2 字节 == 命令码**，状态帧则是 00 00 64… / 00 03 01…
+#
+#   不握手时，Feature/Output、两种校验位、两个厂商接口全试过，写入一律被丢弃。
+#
+# 官方驱动（容源 iot_manager）的 `ry_dongle.rs` 里那两句
+# `F7 wait send timeout!` / `F7 wait read timeout!` 就是它在等这一步，
+# 它界面上「请稍候…」转圈也是这么来的。
+DONGLE_ARM_CMD = P.Cmd.GET_DONGLE_STATUS
+DONGLE_ARM_WAIT = 0.12      # 开闸后等多久接收器才转发（实测 100ms 已够，留余量）
+DONGLE_ARM_TTL = 1.5        # 开闸状态复用时长：这段时间内不再重复握手
+DONGLE_REPLY_WAIT = 0.012   # 发完命令等射频往返，再去取缓存（实测 10ms 命中 8/8）
+DONGLE_REPLY_TIMEOUT = 0.35  # 万一缓存没命中，兜底重试的额度
+DONGLE_POLL = 0.004         # 重试间隔
+# 流式推流（音乐律动）的开闸节奏。开闸窗口实测稳定 ≥1.6s
+# （60/60 条查询连续成功），这里 1.2s 重开一次留足余量。
+# 不能每帧都开闸：那会把每次推流都拖慢 120ms，10Hz 直接掉到 8Hz 还发抖。
+DONGLE_STREAM_REARM = 1.2
+
+# 这几条由接收器自己应答，回复**不**回显命令码，不能套用"回显即真回复"的判据
+DONGLE_NATIVE_CMDS = frozenset({
+    P.Cmd.GET_DONGLE_INFO,
+    P.Cmd.GET_DONGLE_STATUS,
+    P.Cmd.GET_RF_INFO,
+    P.Cmd.GET_DONGLE_ID,
+})
+
+# 接收器状态帧的特征：第 2 字节是 0x00/0x03，且不是任何命令的回显。
+# 判据统一用「真回复的第 2 字节 == 命令码」，所以没有单独的识别函数 —— 见
+# `_dongle_cached()`。曾经写过一个 `is_dongle_status_frame()` 但没人调用，已删。
 
 
 def ble_payload(frame: bytes) -> bytes:
@@ -110,6 +158,27 @@ def is_config_iface(d: dict) -> bool:
     return (d.get("usage_page", 0), d.get("usage", 0)) in CONFIG_SIGNATURES
 
 
+def infer_link(d: dict, vid: int, pid: int) -> str:
+    """推断连接类型：先查已知表，再用 usage / product string 兜底。
+
+    这个判断**决定要不要开闸**，判错了在 2.4G 下就是「能识别但读不到任何东西」：
+      · 判成 usb → 不发 0xF7 → 命令被接收器静默丢弃（症状和"设备坏了"一样）
+      · 判成 2.4g 但实际是有线 → 多发一条无害的 0xF7 查询，代价 120ms
+
+    所以对不确定的情况宁可判 2.4g。别人的键盘 VID/PID 和 PRODUCT 都可能变，
+    靠 `2.4G` / `dongle` / `receiver` 这几个词兜底比只看 PID 稳。
+    """
+    for v, p, _label, link in KNOWN_IDS:
+        if (v, p) == (vid, pid):
+            return link
+    if d.get("usage_page") == BLE_PAGE:
+        return "ble"
+    prod = (d.get("product_string") or "").lower()
+    if any(k in prod for k in ("2.4g", "2.4ghz", "dongle", "receiver")):
+        return "2.4g"
+    return "usb"
+
+
 def discover_config_ifaces() -> list[dict]:
     """扫描所有在线 HID，返回「像配置口」的接口，与已知列表无关。
 
@@ -143,6 +212,9 @@ class Keyboard:
         self.product = product
         self.link = link
         self.ble = (link == "ble")
+        self.dongle = (link == "2.4g")
+        # 上次给接收器「开闸」的时间（monotonic 秒），0 = 还没开过
+        self._armed_at = 0.0
         # True = VID/PID 不在已知列表里，靠 usage 签名自动发现的（别人机器上常见）
         self.auto_detected = False
         self.dev = hid.device()
@@ -186,6 +258,117 @@ class Keyboard:
     def _ble_wait(self) -> float:
         return 0.30
 
+    # ---- 2.4G 接收器底层
+    def _dongle_read(self) -> bytes | None:
+        """读一次 Feature Report，异常吞掉返回 None。"""
+        try:
+            return bytes(self.dev.get_feature_report(P.REPORT_ID, P.FRAME_LEN))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _dongle_arm(self, force: bool = False) -> None:
+        """给接收器「开闸」：发 0xF7 并等它进入转发状态。
+
+        不发这一步，所有写入都会被接收器静默丢掉（实测）。
+
+        ⚠ **开闸是一次性的**（实测 2026-10-27）：写入之后闸就关了，所以普通写入
+        一律 `force=True`。复用 TTL 会把写入静默吞掉 —— 症状是 `set_led()` 返回
+        成功、读回还是旧值，非常难查。TTL 只对查询有意义（`_dongle_query`
+        第一次尝试用它省一次 120ms），流式推流另走 `_dongle_arm_stream()`。
+
+        这里直接用 `self.dev` 而不是 `self.send()`：0xF7 是纯查询命令
+        （已列在 `READ_ONLY` 里），走底层是为了避免被只读模式的通用拦截误伤，
+        它不含任何参数、也不可能改动键盘。
+        """
+        now = time.monotonic()
+        if not force and (now - self._armed_at) < DONGLE_ARM_TTL:
+            return
+        try:
+            self.dev.send_feature_report(P.build_get(DONGLE_ARM_CMD))
+        except Exception:  # noqa: BLE001
+            return
+        time.sleep(DONGLE_ARM_WAIT)
+        self._dongle_read()          # 把接收器自己的状态帧读掉，别留给后面污染
+        self._armed_at = time.monotonic()
+
+    def _dongle_arm_stream(self) -> None:
+        """流式推流专用的开闸节奏（音乐律动那种高频连发）。
+
+        和普通写入不同：推流帧与帧之间不重新开闸，靠开闸窗口（实测 ≥1.6s）
+        连续往下推，只在快过期时补一次。否则每帧都要白等 120ms，
+        10Hz 会掉到 8Hz 且节奏发抖。
+
+        实测（2026-10-27）：按这个节奏 10Hz 推 17.7 秒 / 173 帧，
+        键盘的阶梯、滚动、闪烁三段全部正常显示。
+        """
+        if (time.monotonic() - self._armed_at) < DONGLE_STREAM_REARM:
+            return
+        self._dongle_arm(force=True)
+
+    def _dongle_cached(self, cmd: int, rounds: int = 4) -> bytes | None:
+        """用 0xFC (GET_CACHED_RESPONSE) 把接收器缓存里的上一条回复取出来。
+
+        ⚠ 这是 2.4G 读回复的**主路径**，不是兜底 —— 实测（2026-10-27）：
+        接收器的 Feature 缓冲区只会给出自己的状态帧（`00 00 64…` 电量 100%），
+        键盘的真实回复只进缓存槽，必须发 0xFC 把它「冲」进缓冲区才读得到。
+        之前"等几毫秒直接读就能读到"的现象，其实是上一条 0xFC 的残留。
+        """
+        try:
+            self.dev.send_feature_report(P.build_get(P.Cmd.GET_CACHED_RESPONSE))
+        except Exception:  # noqa: BLE001
+            return None
+        for _ in range(rounds):
+            resp = self._dongle_read()
+            if resp is not None and len(resp) > 1 and resp[1] == cmd:
+                return resp
+            time.sleep(DONGLE_POLL)
+        return None
+
+    def _dongle_query(self, frame: bytes, cmd: int, retries: int = 3) -> bytes | None:
+        """2.4G 下的查询：开闸 → 发帧 → 等射频往返 → 0xFC 取回复。
+
+        注意**不能**靠"发完直接读 Feature"：那条路永远拿回接收器的状态帧。
+        `DONGLE_REPLY_WAIT` 之后立即取缓存，实测 10ms 就能 8/8 命中，单次约 17ms。
+        """
+        last_err: Exception | None = None
+        for attempt in range(retries):
+            # 第 2 次起强制重新开闸（窗口可能已经关了）
+            self._dongle_arm(force=(attempt > 0))
+            try:
+                self.dev.send_feature_report(bytes(frame))
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                continue
+
+            # 接收器自己应答的命令：不回声命令码，读一次就够
+            if cmd in DONGLE_NATIVE_CMDS:
+                time.sleep(0.02)
+                resp = self._dongle_read()
+                if resp is not None and any(resp[:8]):
+                    return resp
+                continue
+
+            time.sleep(DONGLE_REPLY_WAIT)
+            cached = self._dongle_cached(cmd)
+            if cached is not None:
+                return cached
+
+            # 某些情况下回复会直接落到 Feature 缓冲区，再试一次
+            resp = self._dongle_read()
+            if resp is not None and len(resp) > 1 and resp[1] == cmd:
+                return resp
+
+            # 还没到就等一会儿再取一次
+            deadline = time.monotonic() + DONGLE_REPLY_TIMEOUT
+            while time.monotonic() < deadline:
+                time.sleep(DONGLE_REPLY_WAIT)
+                cached = self._dongle_cached(cmd)
+                if cached is not None:
+                    return cached
+        if last_err is not None:
+            raise last_err
+        return None
+
     @classmethod
     def open_any(cls, readonly: bool = True, discover: bool = True) -> "Keyboard":
         """找到键盘就开（默认只读）。
@@ -217,7 +400,7 @@ class Keyboard:
             for d in discover_config_ifaces():
                 if (d["vendor_id"], d["product_id"]) in known:
                     continue          # 已知但没走到上面，说明接口形态不符，别重试
-                link = "ble" if d.get("usage_page") == BLE_PAGE else "usb"
+                link = infer_link(d, d["vendor_id"], d["product_id"])
                 kb = None
                 try:
                     kb = cls(d["path"], readonly=readonly,
@@ -249,7 +432,7 @@ class Keyboard:
             )
         cands.sort(key=iface_rank)
         d = cands[0]
-        link = next((lk for v, p, _l, lk in KNOWN_IDS if (v, p) == (vid, pid)), "usb")
+        link = infer_link(d, vid, pid)
         return cls(d["path"], readonly=readonly, vid=vid, pid=pid,
                    product=d.get("product_string") or "", link=link)
 
@@ -268,17 +451,23 @@ class Keyboard:
         校验最可靠。
         """
         if wait is None:
-            # 有线一轮约 1ms，没必要等；2.4G 要走 dongle 往返
-            if self.ble:
-                wait = self._ble_wait()
-            else:
-                wait = 0.06 if self.link == "usb" else 0.40
+            # 有线一轮约 1ms，没必要等；2.4G 走接收器往返（内部自己轮询）
+            wait = self._ble_wait() if self.ble else 0.06
         req = P.build(P.Cmd.GET_LEDPARAM, None, bit8=True)
         # 探两次：偶发一次通信错误不应该让软件判定"这条线不能配置"
         for attempt in range(2):
             try:
                 if self.ble:
                     resp = self._ble_exchange(req, wait)
+                elif getattr(self, "dongle", False):
+                    # 2.4G：必须开闸 + 取缓存，否则读到的是接收器状态帧，
+                    # 会被下面第 2 条判据判成"命令码不对"，误判成不能配置。
+                    #
+                    # 这里**强制**开闸，不复用 TTL：这是「重新检测」按钮走的路径，
+                    # 用户主动点一次就该真正重新握手。而且刚写完灯时窗口一定是关的，
+                    # 省这 120ms 只会换来一次误报。多 120ms 完全值得。
+                    self._dongle_arm(force=True)
+                    resp = self._dongle_query(req, P.Cmd.GET_LEDPARAM, retries=1)
                 else:
                     self.dev.send_feature_report(req)
                     time.sleep(wait)
@@ -324,6 +513,24 @@ class Keyboard:
             self._ble_drain()
             self.dev.write(bytes([BLE_REPORT_ID]) + ble_payload(frame))
             return
+        if getattr(self, "dongle", False):
+            # 接收器不主动转发：先开闸，命令才到得了键盘（不开闸会被静默丢弃）。
+            # 流式推流（律动）走窗口模式：帧与帧之间不重开闸，否则 10Hz 会掉到 8Hz。
+            if cmd in STREAMING:
+                self._dongle_arm_stream()
+                self.dev.send_feature_report(bytes(frame))
+                return
+            # ⚠ 普通写入必须 force —— 实测「开闸」是一次性的，写完就关；
+            #   复用 TTL 会让写入被丢掉（表现为"写成功但读回还是旧值"）。
+            self._dongle_arm(force=True)
+            self.dev.send_feature_report(bytes(frame))
+            # ★ 写完窗口就关了（2026-10-28 实测确认），所以把"上次开闸时间"
+            #   清零，让状态如实反映"现在没开闸"。不清零的后果：紧随其后的查询
+            #   以为窗口还在，`_dongle_arm(force=False)` 跳过握手 → 裸发 → 读不到，
+            #   表现为刚改完灯就点「重新检测」会误报「配置不可用」。
+            #   （GLM 提的 P2，此处是根因修复，比给它加 retries 更准。）
+            self._armed_at = 0.0
+            return
         self.dev.send_feature_report(bytes(frame))
 
     def query(self, cmd: int, params=None, *, bit8: bool = False, retries: int = 3) -> bytes | None:
@@ -332,6 +539,12 @@ class Keyboard:
         返回的字节无论哪种连接都归一化成 USB 形状（[0]=0, [1]=cmd），上层不用分支。
         注意：Windows 下 get_feature_report 的长度参数是"含 Report ID"的总长。
         """
+        # 只读模式也守一道：BLE / 2.4G 两条分支内部直接调 dev 发送，不经过 send()，
+        # 不在这里挡的话「任何调用路径都无法绕过」这句话对 query() 就不成立。
+        if self.readonly and cmd not in READ_ONLY:
+            raise RuntimeError(
+                f"只读模式：拒绝发送非查询命令 0x{cmd:02X}（帧未发出）"
+            )
         frame = P.build(cmd, params, bit8=bit8)
         if self.ble:
             last = None
@@ -346,6 +559,10 @@ class Keyboard:
             if last:
                 raise last
             return None
+
+        if getattr(self, "dongle", False):
+            # 2.4G：开闸 → 发帧 → 轮询等真回复（回显命令码的那一帧）
+            return self._dongle_query(frame, cmd, retries=retries)
 
         last_err = None
         for _ in range(retries):

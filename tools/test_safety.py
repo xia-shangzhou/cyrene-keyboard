@@ -314,6 +314,35 @@ def test_config_alive_rejects_echo() -> None:
 
 # ---------------------------------------------------------------- 主流程
 
+def test_dongle_write_resets_arm_window() -> None:
+    """2.4G 写入后必须把「上次开闸时间」清零。
+
+    实测（2026-10-28）：接收器的开闸窗口是一次性的，写完一帧窗口就关了，
+    但 `_armed_at` 还停在刚开闸的时刻。这会让紧随其后的查询以为窗口还在、
+    跳过握手直接裸发 → 读不到 → 误报「配置不可用」。
+    症状：2.4G 下刚改完灯就点「重新检测」，要连点两次才恢复。
+    """
+    print("\n9. 2.4G 写入后重置开闸状态（否则紧接的检测会误报）")
+    dev = FakeDev()
+    kb = make_kb(readonly=False, dev=dev)
+    kb.dongle = True
+    kb.link = "2.4g"
+    kb._armed_at = time.monotonic()          # 假装刚开过闸，且仍在 TTL 内
+
+    kb.send(P.build_ledparam(mode=5, speed=2, brightness=3,
+                             options=0x08, rgb=(250, 255, 250)))
+    cmds = [f[1] for f in dev.features]
+    check("写入前先发了开闸 0xF7", 0xF7 in cmds, f"命令序列={[hex(c) for c in cmds]}")
+    check("随后是真正的写命令", P.Cmd.SET_LEDPARAM in cmds)
+    check("写入后开闸状态被清零", kb._armed_at == 0.0, f"_armed_at={kb._armed_at}")
+
+    # 流式帧相反：它靠窗口连续推，不能清零，否则每帧都要重新握手
+    kb._armed_at = time.monotonic()
+    kb.send(P.build_audio_viz_ble([1] * 16))
+    check("流式帧不清零（推流靠窗口连续跑）", kb._armed_at > 0,
+          f"_armed_at={kb._armed_at:.3f}")
+
+
 def main() -> int:
     print("=" * 70)
     print("安全策略与写入链路回归测试（不碰硬件）")
@@ -328,6 +357,7 @@ def main() -> int:
     test_real_invalid_response_still_fails()
     test_valid_response_resets_fail_count()
     test_config_alive_rejects_echo()
+    test_dongle_write_resets_arm_window()
 
     print("\n" + "=" * 70)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

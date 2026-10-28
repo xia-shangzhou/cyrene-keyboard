@@ -121,8 +121,8 @@ class HidBackend(Backend):
         self.readonly = readonly
         self.kb: D.Keyboard | None = None
         self._last_battery = 0.0
-        # 这条通道是否真的转发配置命令。2.4G 实测不转发（GET 全零或回缓存残留），
-        # 这时绝不能让界面把"读不到"显示成"模式=关闭"。
+        # 这条通道现在能不能读到键盘的真实状态。
+        # 读不到时绝不能让界面把"读不到"显示成"模式=关闭"。
         self.config_ok = True
         # 连续失败计数：**不能一次失败就永久禁用** —— 有线时偶发一次通信错误，
         # 也会让软件以为这条线不能配置，只能重启才能恢复，那太脆了。
@@ -152,7 +152,7 @@ class HidBackend(Backend):
             # 别人的键盘 VID/PID 可能不同，靠 usage 签名认出来的
             base += " · 自动识别"
         if not self.config_ok:
-            return base + " · 该通道不转发配置（只读不可用）"
+            return base + " · 配置通道未就绪（只读）"
         return base
 
     def disconnect(self) -> None:
@@ -210,7 +210,7 @@ class HidBackend(Backend):
     def _mark_read_fail(self) -> None:
         """协议级读失败记账。连续 3 次才判定这条线不能配置。
 
-        这里记的是**确定性**失败（回显、全零、命令码不对）——通道真不转发才会这样，
+        这里记的是**确定性**失败（回显、全零、命令码不对）——真读不到键盘才会这样，
         所以 3 次足够。
         """
         self._config_fail += 1
@@ -416,18 +416,22 @@ class HidBackend(Backend):
         只发数据，不切模式 —— 调用方必须先用 set_led() 把模式设成 20/22，
         否则固件没有渲染器接手，数据白推。
 
-        **USB 和蓝牙的线格式完全不同**（2026-10-25 实测踩坑）：
-        - USB/2.4G：校验和 frame[8] + 16 个整字节频段 frame[9..24]
-        - 蓝牙：频段**半字节打包**紧跟命令字节，没有 padding 和校验和；
-          拿 USB 格式往蓝牙上发，症状是柱子「镜像且变小」——
+        **USB 和无线（蓝牙/2.4G）的线格式完全不同**（2026-10-25 蓝牙、10-27 2.4G 实测）：
+        - USB 有线：校验和 frame[8] + 16 个整字节频段 frame[9..24]
+        - 蓝牙 / 2.4G 接收器：频段**半字节打包**紧跟命令字节，没有 padding 和校验和；
+          拿 USB 格式往无线通道上发，症状是柱子「镜像且变小」——
           频段全落错位置，固件把 padding/校验和当成了频段
+
+        2.4G 的帧率不是被带宽卡的（单帧只占 3ms）：真正的开销是接收器要求周期性
+        重新唤醒，那一下约 120ms 推不了帧。所以 UI 上给 25Hz / 50Hz 两档，
+        由 `device.DONGLE_STREAM_REARM` 决定多久补一次唤醒。
         """
         self.policy.assert_allowed(P.Cmd.SET_AUDIO_VIZ)
         if not self.kb:
             raise RuntimeError("未连接")
         if not self.policy.may_send(P.Cmd.SET_AUDIO_VIZ):
             return False
-        if getattr(self.kb, "ble", False):
+        if getattr(self.kb, "ble", False) or getattr(self.kb, "dongle", False):
             self.kb.send(P.build_audio_viz_ble(bands))
         else:
             self.kb.send(P.build_audio_viz(bands))

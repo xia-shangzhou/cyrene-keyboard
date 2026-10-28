@@ -49,6 +49,19 @@ SITE_DEPS = [
 ]
 SITE_FILES = ["_cffi_backend.cp313-win_amd64.pyd", "hid.cp313-win_amd64.pyd"]
 
+# ★ Qt 运行时按清单复制，别改进"整目录复制"或"手工预置"。
+#
+# 为什么需要清单：
+#   · 源环境 PySide6 有 656 MB / 3893 个文件，其中 Qt6WebEngineCore.dll 一个就 195 MB，
+#     程序完全用不到，整份复制会让包多出 100 MB+。
+#   · 以前的 PySide6 是**手工预置**进 `build/portable/` 的（连 dist-info 都没有），
+#     build 目录一清空，打包就产出只带 24 MB、缺整套 Qt 的废包 —— 2026-10-28 踩过。
+#     清单化之后打包可重复，谁都能从源码环境复现同一个包。
+#
+# 清单来源：v0.4.4 发布包实际包含的 3603 个文件（那版已实测能在干净机器上启动）。
+# 源环境里少一个文件就直接失败，不静默跳过 —— 缺 DLL 的包用户装完才发现打不开。
+PYSIDE_MANIFEST = ROOT / "tools" / "pyside_manifest.txt"
+
 # 唯一启动器：双击后立刻退出，不留命令行窗口。
 # 关键在 `start "" pythonw.exe` —— pythonw 没有控制台，start 又不等待子进程，
 # 所以 bat 自身秒退、程序独立存活。这是 v0.3 验证过的形态。
@@ -118,9 +131,9 @@ GUIDE_TXT = """Cyrene Keyboard v{ver} · 使用说明
 【连接方式】
 USB 有线：能调灯，音乐律动最跟手（50Hz）
 蓝牙：能调灯，音乐律动默认 25Hz（也可以手动切到 50Hz）
-2.4G 接收器：只能打字，调不了灯
-  —— 是接收器固件只转发按键、不转发灯效指令，各种办法都试过，
-     不是软件没做。想调灯就插线或者切到蓝牙。
+2.4G 接收器：能调灯，也能玩律动
+  —— 接收器要先被唤醒才转发配置，所以单次改灯会慢约 0.15 秒；
+     连续律动靠唤醒后的传输窗口推流，比有线略钝一点，但可用。
 
 【怎么看电量】
 软件里不显示（三种连接里两种读不准）。
@@ -155,6 +168,28 @@ def write_text_gbk(path: Path, text: str) -> None:
     """bat / vbs 必须 GBK + CRLF，否则中文乱码、批处理括号块会被解错（日志坑 9）。"""
     data = text.replace("\r\n", "\n").replace("\n", "\r\n")
     path.write_bytes(data.encode("gbk", errors="replace"))
+
+
+def patch_pth() -> None:
+    """改写嵌入式运行时的 `python3xx._pth`。
+
+    出厂版本只有 `python313.zip` 和 `.` 两行，**没有 `Lib\\site-packages`、
+    也没启用 `import site`** —— 于是包里的 PySide6 / numpy 一个都 import 不到，
+    打出来的包双击就崩。
+
+    这一步以前是手工改的，`build/` 一清空就丢（2026-10-28 和 PySide6 一起踩），
+    所以改成脚本自动写。文件名按 PYDIR 实际情况取，不硬编码版本号。
+    """
+    pth = next(iter(PYDIR.glob("python3*._pth")), None)
+    zips = list(PYDIR.glob("python3*.zip"))
+    if pth is None or not zips:
+        raise SystemExit(f"{PYDIR} 不像嵌入式运行时（找不到 python3xx._pth / .zip）")
+    want = f"{zips[0].name}\n.\nLib\\site-packages\n\nimport site\n"
+    if pth.read_text(encoding="utf-8", errors="replace") != want:
+        pth.write_text(want, encoding="utf-8", newline="\r\n")
+        print(f"  _pth 已改写：{pth.name} → 含 Lib\\site-packages + import site")
+    else:
+        print(f"  _pth 已是正确内容：{pth.name}")
 
 
 def copy_code(clean: bool) -> None:
@@ -205,6 +240,32 @@ def copy_deps() -> None:
         if s.exists():
             shutil.copy2(s, SP_DST / name)
             print(f"  依赖 {name}")
+
+
+def copy_pyside() -> None:
+    """按 `tools/pyside_manifest.txt` 复制 PySide6 / shiboken6。
+
+    找不到任何一个文件就整批失败：缺 DLL 的包打出来能"成功"，但用户双击才崩，
+    比打包阶段报错糟糕得多。
+    """
+    if not PYSIDE_MANIFEST.exists():
+        raise SystemExit(f"缺少 Qt 文件清单：{PYSIDE_MANIFEST}")
+    src = Path(sys.prefix) / "Lib" / "site-packages"
+    rels = [ln.strip() for ln in
+            PYSIDE_MANIFEST.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    missing = [r for r in rels if not (src / r).exists()]
+    if missing:
+        raise SystemExit(
+            f"源环境缺 {len(missing)} 个 Qt 文件（清单 {len(rels)} 条），"
+            f"例如：{missing[:3]}　—— 先确认 PySide6 版本，别带着残缺的包往下走"
+        )
+    n = 0
+    for rel in rels:
+        dst = SP_DST / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src / rel, dst)
+        n += 1
+    print(f"  Qt 运行时 PySide6+shiboken6  {n} 个文件")
 
 
 def copy_licenses() -> None:
@@ -286,8 +347,10 @@ def main() -> int:
         print("请先解压官方 python-3.13.12-embed-amd64.zip 到 build/portable/python/")
         return 2
 
+    print("\n⓪ 准备运行时"); patch_pth()
     print("\n① 复制代码");   copy_code(args.clean)
     print("\n② 复制依赖");   copy_deps()
+    print("\n②a 复制 Qt 运行时"); copy_pyside()
     print("\n②b 随附许可证"); copy_licenses()
     print("\n③ 写启动器");   write_launchers()
 
